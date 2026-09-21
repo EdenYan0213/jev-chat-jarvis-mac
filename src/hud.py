@@ -123,6 +123,18 @@ GROUP_GAP = 12            # between one group's rows and the next group's dropdo
 BOTTOM_PAD = 18           # below the last group
 
 
+def _log(msg: str) -> None:
+    """One line per stage, to stdout — which the .app launcher redirects into
+    ~/Library/Logs/jev-jarvis.log (and `./start.command` shows in the terminal).
+
+    "It feels slow" is not actionable on its own, so every analysis prints what each stage
+    cost; that is the whole point of this function. Deliberately **no message text and no
+    candidate text**: this file is meant to be pasted into an issue, and the app's premise
+    is that chat content stays on the machine.
+    """
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
 class HudController(NSObject):
     def init(self):
         self = objc.super(HudController, self).init()
@@ -132,6 +144,8 @@ class HudController(NSObject):
         self.last_change_ts = 0.0      # when it last changed (burst detection)
         self.last_analyze_ts = 0.0     # rate limit for analysis starts
         self.analyzed_text = None      # what the panel currently shows
+        self._judged_once = False      # first judge call includes the local model load
+        self._last_skip_reason = None
         self.judge = make_judge()
         self.generator = Generator()
         # 话术: per-slot tone selection. A slot on 不用 contributes no request and no rows,
@@ -641,14 +655,22 @@ class HudController(NSObject):
 
     @objc.python_method
     def _regen_work(self, text: str, intent: str, slot_tones: list[str]):
+        t0 = time.perf_counter()
         try:
             gen = self.generator.generate(text, intent, slot_tones)
+            groups = gen.get("groups") or []
+            failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+            _log(f"换话术 生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms · {len(groups)} 个话术"
+                 + (f" · 失败: {'; '.join(failed)}" if failed else ""))
             payload, err = self._grouped_payload(gen, text, intent)
             if payload is None:
+                _log(f"换话术无可用候选: {err[:60]}")
                 self._push("applyError:", f"候选生成失败: {err[:60]}")
                 return
+            _log(f"换话术 端到端 {(time.perf_counter() - t0) * 1000:.0f}ms")
             self._push("applyTones:", payload)
         except Exception as e:
+            _log(f"换话术失败 {type(e).__name__}: {str(e)[:60]}")
             self._push("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}")
 
     def applyTones_(self, payload):
@@ -769,6 +791,12 @@ class HudController(NSObject):
         if newest.text != self.last_seen:
             self.last_seen = newest.text
             self.last_change_ts = now
+            # only on arrival: this function runs every second, and a per-tick line would
+            # bury the timing that matters
+            t = res.get("timing_ms") or {}
+            _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
+                 f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）")
+            _log(f"新消息 · 等停稳 {SETTLE_S}s 再分析（两次分析最小间隔 {MIN_GAP_S}s）")
             # keep the previous verdict readable; just badge that something new landed
             self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
 
@@ -777,14 +805,25 @@ class HudController(NSObject):
         if newest.text != self.analyzed_text and settled and cooled:
             self.last_analyze_ts = now
             self.analyzed_text = newest.text
+            _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
             self._push("applyPending:", (newest.text, newest.sender, prev_text))
             self._analyze(newest, msgs, prev_text)
+        elif newest.text != self.analyzed_text:
+            # the wait is deliberate; say so once per arrival change so "it feels slow" can
+            # be told apart from "it is still waiting out the burst window"
+            why = "消息还在变" if not settled else f"距上次分析不足 {MIN_GAP_S}s"
+            if self._last_skip_reason != why:
+                self._last_skip_reason = why
+                _log(f"暂不分析（{why}）")
+        else:
+            self._last_skip_reason = None
 
     @objc.python_method
     def _analyze(self, newest, msgs, prev_text: str = ""):
         """Judge and generate in parallel, then rank. Judgment lands on screen first."""
         import concurrent.futures as cf
 
+        t0 = time.perf_counter()
         context = "\n".join(m.text for m in msgs[:-1][-4:]) or None
         with cf.ThreadPoolExecutor(max_workers=2) as ex:
             # generation does not need the intent, so it runs while judging; it does need the
@@ -792,22 +831,45 @@ class HudController(NSObject):
             gen_future = ex.submit(self.generator.generate, newest.text, "",
                                    list(self.slot_tones))
             verdict = None
+            t_judge = time.perf_counter()
             try:
                 verdict = self.judge.judge(newest.text, context=context)
+                ms = (time.perf_counter() - t_judge) * 1000
+                first = not self._judged_once
+                self._judged_once = True
+                # the model load happens on the first call and is seconds, not milliseconds —
+                # without saying so the first verdict looks like a performance regression
+                note = "（首次，含本地模型加载）" if first else ""
+                _log(f"判断 {ms:.0f}ms → {verdict.get('intent', '?')}"
+                     f" 把握 {verdict.get('confidence', 0):.0%}"
+                     f" 风险 {verdict.get('risk', '?')}{note}")
                 self._push("applyJudgment:", (verdict, newest.sender, prev_text))
             except Exception as e:
+                _log(f"判断失败 {type(e).__name__}: {str(e)[:60]}")
                 self._push("applyError:", f"判断失败: {type(e).__name__}: {str(e)[:40]}")
 
             try:
                 gen = gen_future.result()
             except Exception as e:
+                _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
                 self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
                 return
+            groups = gen.get("groups") or []
+            failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+            _log(f"生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms · {len(groups)} 个话术并发"
+                 f" → {sum(len(g['texts']) for g in groups)} 条候选"
+                 + (f" · 失败: {'; '.join(failed)}" if failed else ""))
             intent = verdict["intent"] if verdict else ""
+            t_rank = time.perf_counter()
             payload, err = self._grouped_payload(gen, newest.text, intent)
+            rank_ms = (time.perf_counter() - t_rank) * 1000
             if payload is None:
+                _log(f"生成无可用候选: {err[:60]}")
                 self._push("applyError:", f"候选生成失败: {err[:60]}")
                 return
+            _log(f"排序 {rank_ms:.0f}ms（本地模型，一次前向）")
+            _log(f"端到端 {(time.perf_counter() - t0) * 1000:.0f}ms"
+                 f" · 从分析开始到候选上屏")
             self._push("applyCandidates:", payload)
 
     @objc.python_method
