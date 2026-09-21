@@ -1,0 +1,368 @@
+"""Perception layer: find WeChat's window, capture it, OCR it, extract the conversation.
+
+Validated facts this module is built on (probed 2026-09-21 on WeChat 4.1 Mac):
+  * `screencapture -l <windowid>` returns real content even when WeChat is not frontmost,
+    so our HUD floating above it never pollutes the capture.
+  * Vision OCR reads Simplified Chinese chat text at conf 1.00 on message bodies;
+    errors are rare and confined to unusual glyphs.
+  * The window layout is stable: chat list occupies x < ~0.30, chat pane x > ~0.32,
+    title bar above y ~0.90, input box below y ~0.09.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import Quartz
+
+# --- layout constants (normalized 0..1 within the window; tuned on the probe data) ---
+CHAT_PANE_X_MIN = 0.32
+TITLE_BAR_Y_MAX = 0.90
+INPUT_AREA_Y_MIN = 0.24
+SIDEBAR_X_MAX = 0.30
+
+# --- content filters ---
+TIMESTAMP_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$")
+UI_NOISE = (r"折叠聊天", r"共\s*\d+", r"搜索", r"发送", r"拖入文件", r"按住说话",
+            r"语音输入文字", r"按住鼠标", r"按住 说话", r"输入文字",
+            r"^[\w\-\u4e00-\u9fa5]{2,20}[:：].*\.\.\..*[）)]>$")  # folded-chat banner
+MIN_CONF = 0.30
+USERNAME_H_MAX = 0.026   # sender-name lines render smaller than bubble text
+MESSAGE_H_MIN = 0.028
+MIN_TEXT_LEN = 1
+
+
+@dataclass
+class TextBlock:
+    text: str
+    conf: float
+    x: float
+    y: float
+    w: float
+    h: float
+
+    @property
+    def x_right(self) -> float:
+        return self.x + self.w
+
+    @property
+    def x_center(self) -> float:
+        return self.x + self.w / 2
+
+
+@dataclass
+class Message:
+    text: str
+    side: str          # "them" | "me"
+    y: float           # normalized, top-origin for readability
+    conf: float
+    h: float = 0.0
+    sender: str | None = None
+    lines: list[str] = field(default_factory=list)
+
+
+@dataclass
+class WindowInfo:
+    wid: int
+    pid: int
+    title: str
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+# --------------------------------------------------------------------------- window
+
+
+def screen_capture_ok() -> bool:
+    """False when macOS has not granted Screen Recording to this app.
+
+    Worth checking explicitly: without the grant macOS silently hides every window's
+    title, so find_wechat_window() would just report "not found" and the user would see
+    the panel disappear for no stated reason.
+    """
+    try:
+        return bool(Quartz.CGPreflightScreenCaptureAccess())
+    except Exception:
+        return True  # pre-10.15 has no such gate
+
+
+def request_screen_capture() -> bool:
+    """Ask the system to show the Screen Recording prompt (once per app identity)."""
+    try:
+        return bool(Quartz.CGRequestScreenCaptureAccess())
+    except Exception:
+        return False
+
+
+def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
+    """Largest titled WeChat window (the main one). Independent of window order."""
+    opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
+    wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
+    best: WindowInfo | None = None
+    for w in wins:
+        owner = w.get("kCGWindowOwnerName") or ""
+        if "WeChat" not in owner and "微信" not in owner:
+            continue
+        title = w.get("kCGWindowName") or ""
+        b = dict(w.get("kCGWindowBounds") or {})
+        wi = WindowInfo(
+            wid=int(w.get("kCGWindowNumber") or 0),
+            pid=int(w.get("kCGWindowOwnerPID") or 0),
+            title=title,
+            x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
+            w=float(b.get("Width", 0)), h=float(b.get("Height", 0)),
+        )
+        # main window: has a title, layer 0-ish, big, roughly window-shaped
+        if not title or wi.w < 600 or wi.h < 400:
+            continue
+        # only a titled, window-sized window can be the main chat window
+        if best is None or (wi.w * wi.h, wi.wid) > (best.w * best.h, best.wid):
+            best = wi
+
+    # stick with the window we already chose: WeChat 4.x keeps several equally-sized
+    # windows around, and re-picking each tick let the target jump between them
+    if previous_wid is not None and best is not None and best.wid != previous_wid:
+        for w in wins:
+            owner = w.get("kCGWindowOwnerName") or ""
+            if "WeChat" not in owner and "微信" not in owner:
+                continue
+            if int(w.get("kCGWindowNumber") or 0) != previous_wid:
+                continue
+            title = w.get("kCGWindowName") or ""
+            b = dict(w.get("kCGWindowBounds") or {})
+            pw = float(b.get("Width", 0))
+            ph = float(b.get("Height", 0))
+            if title and pw >= 600 and ph >= 400:
+                return WindowInfo(wid=previous_wid, pid=int(w.get("kCGWindowOwnerPID") or 0),
+                                  title=title, x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
+                                  w=pw, h=ph)
+    return best
+
+
+def capture_window(wid: int, out: Path) -> bool:
+    p = subprocess.run(["screencapture", "-x", "-o", "-l", str(wid), str(out)],
+                       capture_output=True, text=True)
+    return p.returncode == 0 and out.exists() and out.stat().st_size > 1000
+
+
+# ----------------------------------------------------------------------------- ocr
+
+
+def ocr(path: Path, languages=("zh-Hans", "en-US"), chat_only: bool = True) -> list[TextBlock]:
+    import Vision
+    from Foundation import NSURL
+    from Quartz import CGRectMake
+
+    url = NSURL.fileURLWithPath_(str(path))
+    handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
+    blocks: list[TextBlock] = []
+
+    def completion(request, error):
+        if error:
+            return
+        for obs in request.results() or []:
+            cands = obs.topCandidates_(1)
+            if not cands:
+                continue
+            c = cands[0]
+            bb = obs.boundingBox()
+            blocks.append(TextBlock(
+                text=c.string().strip(),
+                conf=float(c.confidence()),
+                x=float(bb.origin.x), y=float(bb.origin.y),
+                w=float(bb.size.width), h=float(bb.size.height),
+            ))
+
+    req = Vision.VNRecognizeTextRequest.alloc().initWithCompletionHandler_(completion)
+    req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+    req.setRecognitionLanguages_(list(languages))
+    req.setUsesLanguageCorrection_(True)
+    roi = None
+    if chat_only:
+        # Vision region of interest: normalized, origin BOTTOM-LEFT. Skipping the chat
+        # list roughly halves OCR time. Note Vision then reports each observation's
+        # bounding box RELATIVE TO THE ROI, so we convert back to full-window space.
+        roi = (CHAT_PANE_X_MIN, INPUT_AREA_Y_MIN,
+               1.0 - CHAT_PANE_X_MIN, 1.0 - INPUT_AREA_Y_MIN)
+        req.setRegionOfInterest_(CGRectMake(*roi))
+    handler.performRequests_error_([req], None)
+
+    if roi is not None:
+        rx, ry, rw, rh = roi
+        for b in blocks:
+            b.x = rx + b.x * rw
+            b.y = ry + b.y * rh
+            b.w *= rw
+            b.h *= rh
+    return blocks
+
+
+# ---------------------------------------------------------------------- extraction
+
+
+def _is_noise(b: TextBlock) -> bool:
+    if b.conf < MIN_CONF or len(b.text) < MIN_TEXT_LEN:
+        return True
+    if TIMESTAMP_RE.match(b.text):
+        return True
+    return any(re.search(pat, b.text) for pat in UI_NOISE)
+
+
+def extract_chat_title(blocks: list[TextBlock]) -> str:
+    """Read the conversation name from the chat pane's header band.
+
+    Two rows live up there: the title itself and (when a chat is collapsed) a
+    "folded chats" banner. We take the topmost readable band and drop the banner.
+    """
+    cands = [b for b in blocks
+             if b.x >= CHAT_PANE_X_MIN and b.y > TITLE_BAR_Y_MAX
+             and b.conf >= 0.30 and len(b.text) >= 2 and not _is_noise(b)]
+    if not cands:
+        return ""
+    cands.sort(key=lambda b: (-b.y, -len(b.text)))
+    top_y = cands[0].y
+    band = [b for b in cands if top_y - b.y < 0.03]
+    # the header also contains the chat-info / call / menu glyphs, which OCR turns into
+    # short junk. The conversation name is by far the longest run of text up there.
+    longest = max(band, key=lambda b: len(b.text))
+    if len(longest.text) < 4:
+        return ""
+    keep = sorted((b for b in band if len(b.text) >= len(longest.text) * 0.5),
+                  key=lambda b: b.x)
+    return " ".join(b.text for b in keep).strip()
+
+
+def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Message]:
+    """Turn raw OCR blocks into an ordered list of chat messages (bottom = newest)."""
+    chat = [b for b in blocks
+            if b.x >= CHAT_PANE_X_MIN and INPUT_AREA_Y_MIN < b.y < TITLE_BAR_Y_MAX
+            and not _is_noise(b)]
+    if not chat:
+        return []
+
+    # Vision y is bottom-origin; convert to top-origin so reading order is "biggest = topmost"
+    for b in chat:
+        b.y = 1.0 - b.y
+    chat.sort(key=lambda b: b.y)
+
+    # group blocks that sit on the same visual line
+    lines: list[list[TextBlock]] = []
+    for b in chat:
+        if lines and abs(b.y - lines[-1][0].y) < 0.012:
+            lines[-1].append(b)
+        else:
+            lines.append([b])
+
+    merged = []
+    for group in lines:
+        group.sort(key=lambda b: b.x)
+        text = " ".join(b.text for b in group)
+        merged.append(TextBlock(text=text, conf=min(b.conf for b in group),
+                                x=min(b.x for b in group), y=group[0].y,
+                                w=max(b.x_right for b in group) - min(b.x for b in group),
+                                h=max(b.h for b in group)))
+
+    # left/right split inside the chat pane: the pane spans CHAT_PANE_X_MIN..1.0,
+    # so its midline is (CHAT_PANE_X_MIN + 1.0) / 2
+    midline = (CHAT_PANE_X_MIN + 1.0) / 2
+
+    # fold continuation lines (same side, tight vertical gap, no new sender header)
+    per_line = sorted(merged, key=lambda b: b.y)
+    messages: list[Message] = []
+    for b in per_line:
+        side = "me" if b.x_center > midline else "them"
+        gap = (b.y - messages[-1].y) if messages else 1.0
+        if messages and messages[-1].side == side and gap < 0.045:
+            messages[-1].lines.append(b.text)
+            messages[-1].text = "\n".join(messages[-1].lines)
+            messages[-1].conf = min(messages[-1].conf, b.conf)
+        else:
+            messages.append(Message(text=b.text, side=side, y=b.y, conf=b.conf,
+                                    h=b.h, lines=[b.text]))
+
+    # in group chats WeChat renders the sender name as a short line above the bubble.
+    # A wider-than-usual gap after a short line is the tell; that line becomes the
+    # following message's sender rather than a message of its own.
+    named: list[Message] = []
+    for i, m in enumerate(messages):
+        nxt = messages[i + 1] if i + 1 < len(messages) else None
+        if (nxt is not None and nxt.side == m.side and len(m.text) <= 16
+                and "\n" not in m.text
+                # two independent signals: the name line is set in smaller type and the
+                # line under it is set in message-sized type. Both must agree — a wrong
+                # name is worse than no name.
+                and m.h < USERNAME_H_MAX and nxt.h >= MESSAGE_H_MIN
+                and (nxt.y - m.y) > 0.035):
+            nxt.sender = m.text.strip().rstrip("：:")
+            continue
+        # A small-type line with nothing message-sized under it is a stray sender name
+        # (WeChat renders one above every bubble, including image-only messages). It is
+        # never something to judge, so drop it rather than show it as a message.
+        if m.h < USERNAME_H_MAX and len(m.text) <= 16 and "\n" not in m.text:
+            continue
+        named.append(m)
+    return named[-max_messages:]
+
+
+def looks_like_sender_name(msg: Message, following: Message | None) -> bool:
+    """Heuristic: group chats render the sender name as a short line above the bubble."""
+    if following is None:
+        return False
+    t = msg.text.strip()
+    if len(t) > 16 or "\n" in t:
+        return False
+    gap = following.y - msg.y
+    return gap > 0.045
+
+
+# ---------------------------------------------------------------------- public API
+
+
+def read_conversation(max_messages: int = 12, previous_wid: int | None = None) -> dict:
+    """One-shot read: find window -> capture -> OCR -> messages."""
+    t0 = time.perf_counter()
+    win = find_wechat_window(previous_wid)
+    if win is None:
+        return {"ok": False, "error": "WeChat main window not found", "messages": []}
+
+    with tempfile.TemporaryDirectory() as td:
+        png = Path(td) / "wechat.png"
+        if not capture_window(win.wid, png):
+            return {"ok": False, "error": "capture failed", "messages": []}
+        t_cap = time.perf_counter()
+        blocks = ocr(png)
+        t_ocr = time.perf_counter()
+
+    msgs = extract_messages(blocks, max_messages=max_messages)
+    return {
+        "ok": True,
+        "chat_title": extract_chat_title(blocks),
+        "window": {"wid": win.wid, "title": win.title, "w": win.w, "h": win.h,
+                   "x": win.x, "y": win.y},
+        "messages": msgs,
+        "timing_ms": {"capture": (t_cap - t0) * 1000, "ocr": (t_ocr - t_cap) * 1000,
+                      "total": (t_ocr - t0) * 1000},
+        "n_blocks": len(blocks),
+    }
+
+
+if __name__ == "__main__":
+    import json
+
+    res = read_conversation()
+    if not res["ok"]:
+        print("ERROR:", res["error"])
+        raise SystemExit(1)
+    print(f"window {res['window']['w']:.0f}x{res['window']['h']} "
+          f"capture={res['timing_ms']['capture']:.0f}ms ocr={res['timing_ms']['ocr']:.0f}ms "
+          f"blocks={res['n_blocks']}")
+    print("--- messages (top to bottom) ---")
+    for m in res["messages"]:
+        print(f"  [{m.side:4s}] y={m.y:.3f} conf={m.conf:.2f} | {m.text}")
