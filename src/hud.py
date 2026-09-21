@@ -67,6 +67,7 @@ COLLAPSED_H = 96              # height when the panel is rolled up
 POLL_INTERVAL = 1.0     # detection granularity
 SETTLE_S = 1.2          # wait this long with no new message before analysing (anti-flood)
 MIN_GAP_S = 2.0         # never restart analysis faster than this
+CONTEXT_TURNS = 4       # how many recent turns both halves get to see
 
 
 # ---------------------------------------------------------------- palette
@@ -825,17 +826,36 @@ class HudController(NSObject):
             self._last_skip_reason = None
 
     @objc.python_method
+    def _context_text(self, msgs, newest) -> str | None:
+        """The last few turns, each prefixed with who said it — shared by both halves.
+
+        The names are the point. The judge used to receive a jumble of lines with no
+        speaker, which in a group chat throws away the most useful clue available: who is
+        talking, and whether the last thing said was mine. One-to-one chats render no name
+        above the bubble, so 我/对方 stands in.
+
+        The message under judgment is excluded **by identity**, not by position: `newest` is
+        the last message from the other side, which is not the same as the last element of
+        `msgs` (my own replies come after it).
+        """
+        prior = [m for m in msgs if m is not newest][-CONTEXT_TURNS:]
+        if not prior:
+            return None
+        return "\n".join(
+            f"{m.sender or ('我' if m.side == 'me' else '对方')}: {m.text}" for m in prior)
+
+    @objc.python_method
     def _analyze(self, newest, msgs, prev_text: str = ""):
         """Judge and generate in parallel, then rank. Judgment lands on screen first."""
         import concurrent.futures as cf
 
         t0 = time.perf_counter()
-        context = "\n".join(m.text for m in msgs[:-1][-4:]) or None
+        context = self._context_text(msgs, newest)
         with cf.ThreadPoolExecutor(max_workers=2) as ex:
             # generation does not need the intent, so it runs while judging; it does need the
             # chosen 话术, which is read here (a plain list read) and passed in
             gen_future = ex.submit(self.generator.generate, newest.text, "",
-                                   list(self.slot_tones))
+                                   list(self.slot_tones), context)
             verdict = None
             t_judge = time.perf_counter()
             try:

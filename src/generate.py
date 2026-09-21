@@ -52,7 +52,7 @@ MISSING_HINT = ("未配置生成层 Key：候选回复需要它，判断/风险�
 # "您息怒我马上跪着改完给您磕头了", and 贴吧老哥 picks up "我自己看了都想删号".
 PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
 
-消息：「{message}」
+{context_line}消息：「{message}」
 {intent_line}
 请写 {n} 条回复候选，语气统一成下面这一种，但两条的胆量要有差别：
 「{tone}」{instruction}
@@ -226,10 +226,15 @@ class Generator:
                 out.append(s.strip())
         return out
 
-    def _one_tone(self, message: str, intent: str, tone: str) -> tuple[list[str], str]:
+    def _one_tone(self, message: str, intent: str, tone: str,
+                  context: str | None = None) -> tuple[list[str], str]:
         """One request for one tone. Returns (texts, error); never raises."""
+        # The recent turns go in with their speakers ("王总: …"), because a reply that fits
+        # the last two sentences is usually not a reply to this one sentence in isolation.
+        context_line = f"最近的对话：\n{context}\n\n" if context else ""
         intent_line = f"判断出的意图：{intent}\n" if intent else ""
-        prompt = PROMPT_ONE.format(message=message, intent_line=intent_line,
+        prompt = PROMPT_ONE.format(message=message, context_line=context_line,
+                                   intent_line=intent_line,
                                    n=styles.PER_TONE, tone=tone,
                                    instruction=styles.PRESETS[tone])
         try:
@@ -242,7 +247,8 @@ class Generator:
         return self._parse(raw)[:styles.PER_TONE], ""
 
     def generate(self, message: str, intent: str = "",
-                 slot_tones: list[str] | None = None) -> dict:
+                 slot_tones: list[str] | None = None,
+                 context: str | None = None) -> dict:
         """One concurrent request per selected 话术; returns the candidates grouped by tone.
 
         A tone gets its own request rather than one request listing every tone: asking a
@@ -263,7 +269,7 @@ class Generator:
         t0 = time.perf_counter()
         groups: list[dict] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as ex:
-            futures = {i: ex.submit(self._one_tone, message, intent, tone)
+            futures = {i: ex.submit(self._one_tone, message, intent, tone, context)
                        for i, tone in active}
             for i, tone in active:          # read in slot order, not completion order
                 try:
