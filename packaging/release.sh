@@ -43,6 +43,16 @@ if [ -z "$VERSION" ]; then
 fi
 mkdir -p "$OUT"
 
+# GitHub's release API only resolves a full commit SHA or a branch name for target_commitish
+# (a short SHA comes back as "target_commitish is invalid"), so resolve it here
+if [ -n "$TARGET" ]; then
+    if ! TARGET_SHA="$(git -C "$ROOT" rev-parse --verify "$TARGET^{commit}" 2>/dev/null)" || [ -z "$TARGET_SHA" ]; then
+        echo "--target 找不到这个提交：$TARGET" >&2
+        exit 2
+    fi
+    TARGET="$TARGET_SHA"
+fi
+
 echo "==> 构建 .app"
 "$ROOT/packaging/build_app.sh"
 APP="$ROOT/jev-jarvis.app"
