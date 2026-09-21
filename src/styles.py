@@ -13,53 +13,96 @@ from __future__ import annotations
 
 import re
 
+import userconfig
+
 # How many candidates one generation call can produce. The HUD shows exactly this many
 # dropdowns; the panel's candidate area is built for this many rows.
 MAX_SLOTS = 3
 
+# Candidates per tone. Each tone gets its own request (they run concurrently), and the 2
+# replies in one response are the same voice at two different levels of nerve: the first
+# stays sendable as-is, the second leans into the persona (see PROMPT_ONE in generate.py).
+# A tone asked for twice in one prompt tends to bleed into itself, which is why one tone
+# equals one request.
+PER_TONE = 2
+
 # label -> instruction. Order here is the order shown in the dropdowns.
-PRESETS: dict[str, str] = {
+#
+# Each entry is written as a *persona plus its verbal tics*, not as a description of a mood.
+# "语气放松、带一点幽默" gives the model nothing to hold on to and every tone drifts toward
+# the same bland helpfulness; naming who is talking and which words they reach for is what
+# actually separates the voices. The trailing constraint matters as much as the rest: a tone
+# with no ceiling slides back into generic politeness by the second line.
+BUILTIN: dict[str, str] = {
     "高情商话术": (
-        "高情商：先接住对方的情感和诉求，再把难处说成客观情况而不是你的态度；"
-        "拒绝也要给出替代方案和一个明确的下一步，给对方留台阶。不谄媚、不硬扛。"
+        "像公司里那个谁都说好的老同事：先接住对方情绪（「我理解」「确实」），再说事实和下一步，"
+        "拒绝也带替代方案加一个具体时间点。不说教、不绕圈子、句尾不堆「呢/哦/啦」。"
     ),
     "贴吧老哥 v1.0": (
-        "贴吧老哥：像贴吧/论坛里说话，口语化、可以自嘲和玩梗、有话直说不装，"
-        "带一点痞气但不冒犯。禁止书面语和客套话，要有网感。"
+        "贴吧老哥：一口网感口语，「有一说一」「绷不住了」「搁这」「这就去整」随手就来，"
+        "自称我、管对方叫「哥/兄弟」，可以自嘲玩梗甚至摆烂，但不骂人。"
+        "禁止「您好」「感谢」这类书面客套。"
     ),
     "拒绝加班": (
-        "拒绝加班：明确说今天做不完、时间上排不进去，语气平和但不留继续压的空间；"
-        "必须给一个可接受的替代（比如明早第一时间、或一个具体时间点）。不过度道歉。"
+        "态度平和但把话说死：明确今天做不完，**不给**「我尽量」「看情况」这种会被继续压的口子；"
+        "必须给一个具体替代时间（比如「明早九点前」），并说清不用等今晚。"
+        "道歉不超过一句，理由不超过一句。"
     ),
     "卑微乙方": (
-        "卑微乙方：姿态放到极低，极度客气、随叫随到、把问题都算在自己头上，"
-        "像随时怕甲方不高兴的乙方。适度夸张，让人一看就懂这个梗，但话本身仍然能直接发出去。"
+        "极度卑微的乙方：「好的好的」「收到收到」「实在抱歉」「麻烦您了」张口就来，全程称「您」，"
+        "任何问题先认在自己头上，随叫随到。夸张到一眼看出是梗，但整句仍然能直接发出去。"
     ),
     "稳如老狗": (
-        "沉稳：不解释、不辩解、不铺垫，只给事实、结论和一个明确时间点；"
-        "语气平静，让对方觉得事情稳了。"
+        "十年老工程师那种稳：不解释、不铺垫、不道歉，只给结论加一个时间点，句子短、"
+        "主语是事不是情绪（「三点前给你」「已确认，没问题」），让对方觉得事情已经稳了。"
     ),
     "已读乱回": (
-        "敷衍但不失礼：用最短的话把对方接住，不承诺任何事、不展开细节，"
-        "让对方觉得你回了、但又没法接着追问。"
+        "敷衍但不失礼：一到六个字把对方接住（「在忙，你说」「嗯嗯」「好」），"
+        "不承诺、不展开、不给时间点，让对方觉得回了又没法接着追问。"
     ),
     "职场黑话": (
-        "职场黑话：用互联网黑话把简单的事说得很专业（对齐、抓手、闭环、颗粒度、"
-        "拉通、复盘、赋能、沉淀），但整句要能看懂，不要堆砌到不知所云。"
+        "把简单的事说得很专业：对齐、抓手、闭环、颗粒度、拉通、复盘、赋能、沉淀、打法轮着用，"
+        "一句话里至少两个；但整句要能看懂，不要堆到不知所云。"
     ),
     "阴阳怪气": (
-        "阴阳怪气：表面礼貌客气，实际带着软刺和反问，让对方不好发作又不能说你没礼貌。"
-        "这是高风险选项，克制一点，别变成直接骂人。"
+        "表面客气、话里带刺：多用「哦」「呢」「那就」「辛苦你了」配反问或夸张的客气，"
+        "让对方不好发作又不能说你没礼貌。不要升级成直接骂人或人身攻击。"
     ),
     "理科直男": (
-        "理科直男：只回答被问到的问题本身，零寒暄、零情绪、零修饰，"
-        "短到不能再短，像一个不太会说话但很靠谱的工程师。"
+        "只回答被问到的：零寒暄、零情绪、零修饰、零表情，能两个字说清就不用五个字，"
+        "像一个不太会说话但很靠谱的工程师。不做任何延伸，也不表示关心。"
     ),
 }
 
 # What the panel starts with: two tones, not three — a third slot defaults to 不用.
 DEFAULT_SLOTS: list[str] = ["高情商话术", "贴吧老哥 v1.0"]
 NONE_LABEL = "不用"          # the third dropdown's way of saying "only two candidates"
+
+CUSTOM_VAR = "JEV_TONES"     # env var holding user-defined tones
+
+
+def _custom_tones() -> dict[str, str]:
+    """Tones the user defined in their env file, as `名字=说明` entries separated by `|`.
+
+        export JEV_TONES="摸鱼大师=像个资深摸鱼选手，把活推得很得体|孙子兵法=用兵法比喻说话"
+
+    A same-named entry overrides the built-in one, so the shipped wording can be tuned
+    without touching this file. A tone called 不用 is dropped: that label is the panel's
+    sentinel for "this slot is switched off", and letting a tone shadow it would make a
+    slot impossible to switch off.
+    """
+    raw = userconfig.get(CUSTOM_VAR)
+    out: dict[str, str] = {}
+    for part in (raw or "").split("|"):
+        name, sep, desc = part.partition("=")
+        name, desc = name.strip(), desc.strip()
+        if sep and name and desc and name != NONE_LABEL:
+            out[name] = desc
+    return out
+
+
+CUSTOM: dict[str, str] = _custom_tones()
+PRESETS: dict[str, str] = {**BUILTIN, **CUSTOM}
 
 def _label_alternation() -> str:
     """The labels as one regex alternative, with spaces made optional.
@@ -79,24 +122,6 @@ _LABEL_RE = re.compile(
 def labels() -> list[str]:
     """All preset labels, in dropdown order."""
     return list(PRESETS)
-
-
-def resolve(ids: list[str]) -> list[str]:
-    """Turn dropdown selections into a usable list: known labels only, no duplicates.
-
-    Duplicates matter because the three dropdowns are independent — picking the same tone
-    twice would otherwise ask the model for two replies in one voice.
-    """
-    out: list[str] = []
-    for i in ids:
-        if i in PRESETS and i not in out:
-            out.append(i)
-    return out
-
-
-def prompt_block(ids: list[str]) -> str:
-    """The numbered style list that goes into the generation prompt."""
-    return "\n".join(f"{n}. {label}：{PRESETS[label]}" for n, label in enumerate(ids, 1))
 
 
 def strip_label(line: str) -> str:

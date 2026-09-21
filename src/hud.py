@@ -49,7 +49,7 @@ from AppKit import (
     NSWindowZoomButton,
     NSWindowCloseButton,
 )
-from Foundation import NSMakeRect, NSObject, NSTimer
+from Foundation import NSMakeRect, NSMakeSize, NSObject, NSTimer
 
 sys.path.insert(0, str(Path(__file__).parent))
 import userconfig  # noqa: E402
@@ -67,7 +67,7 @@ COLLAPSED_H = 96              # height when the panel is rolled up
 POLL_INTERVAL = 1.0     # detection granularity
 SETTLE_S = 1.2          # wait this long with no new message before analysing (anti-flood)
 MIN_GAP_S = 2.0         # never restart analysis faster than this
-N_CANDIDATES = styles.MAX_SLOTS   # one candidate per 话术 slot, so these cannot drift apart
+
 
 # ---------------------------------------------------------------- palette
 # WeChat's light theme: a #F7F7F7 surface, near-black body text, #888888 for anything
@@ -90,13 +90,15 @@ PALETTE = {
     "green": _rgb(0x07C160),  # WeChat brand green — risk 安全, success feedback
     "amber": _rgb(0xFA9D3B),  # risk 留神
     "red": _rgb(0xFA5151),    # risk 危险, failures
+    # The 话术 dropdown is drawn as a WeChat-style field: a flat light surface with a
+    # hairline, because the stock popup bezel brings the system accent colour (a blue
+    # chevron) into a panel that has no other system-accent pixel in it.
+    "field": _rgb(0xF2F2F2),
+    "edge": _rgb(0xE3E3E3),
 }
 
-# Candidate row geometry: 复制 + 填入 share the panel's right edge, so they compete with the
-# candidate text for width. Measured on screen: a rounded bezel holds a two-character Chinese
-# title at 56 pt and clips it to one character at 44 pt ("复" / "填"), so the buttons cannot be
-# shrunk further — the text column gives up the 24 pt instead. Height is fine at 24 pt; the
-# cell's own 32 pt request is padding for a focus ring this button never draws.
+# Candidate row geometry. A row is 48 pt tall inside a 56 pt pitch, so rows keep the same
+# breathing room as before; prob and buttons share the text's bottom edge.
 CAND_BTN_W, CAND_BTN_H, CAND_BTN_GAP = 56, 24, 4
 CAND_BTN_X = PANEL_W - 14 - (2 * CAND_BTN_W + CAND_BTN_GAP)   # 230
 # Rank/percentage label ("#3 · 100%"): NSTextField's cell insets mean the widest string
@@ -105,15 +107,20 @@ CAND_BTN_X = PANEL_W - 14 - (2 * CAND_BTN_W + CAND_BTN_GAP)   # 230
 # candidate text — which needs them: at 116 px a 30-character candidate (the generation
 # prompt's own cap) lost its last two characters to the 3-line limit.
 CAND_PROB_X, CAND_PROB_W = 14, 72                              # 14 .. 86
-CAND_TEXT_X = CAND_PROB_X + CAND_PROB_W + 8                    # 106
+CAND_TEXT_X = CAND_PROB_X + CAND_PROB_W + 8                    # 94
 CAND_TEXT_W = CAND_BTN_X - CAND_TEXT_X - 8                     # 128
 CAND_TEXT_H = 48                                                # up to 3 wrapped lines
+CAND_ROW_H = 56                                                 # vertical pitch of one row
 
-# 话术 pickers: three stacked rows under the candidate list, each one labelled #1/#2/#3 —
-# its rank prefix sits in the left column, the dropdown takes the rest of the width
-# (14 + 26 + 6 + 300 = 346 = PANEL_W - 14, the same right margin as everything else)
-TONE_RANK_X, TONE_RANK_W = 14, 26
-TONE_POP_X, TONE_POP_W, TONE_POP_H, TONE_POP_GAP = 46, 300, 24, 6
+# 话术 groups. Each group is headed by its dropdown; its candidates sit under it. The panel
+# is only as tall as the groups in use, so nothing is reserved for a tone that is switched
+# off (that reservation is what used to leave a dead gap in the middle).
+TONE_DD_X, TONE_DD_W, TONE_DD_H, TONE_DD_GAP = 14, PANEL_W - 28, 24, 6
+TONE_DD_INSET = 6         # the popup sits this far inside its field, like text in an input box
+TONE_DD_FONT = 13         # bigger than the 11 pt labels: it is a control, and it is the one
+                          # thing on the panel the user is meant to click
+GROUP_GAP = 12            # between one group's rows and the next group's dropdown
+BOTTOM_PAD = 18           # below the last group
 
 
 class HudController(NSObject):
@@ -127,12 +134,22 @@ class HudController(NSObject):
         self.analyzed_text = None      # what the panel currently shows
         self.judge = make_judge()
         self.generator = Generator()
-        # 话术: which tones the candidate half writes in. Defaults to two (see styles.py);
-        # the third slot starts on 不用 so the panel opens with two candidates, not three.
-        self.tones = styles.resolve(styles.DEFAULT_SLOTS)
-        self._tone_pops: list = []
+        # 话术: per-slot tone selection. A slot on 不用 contributes no request and no rows,
+        # so the panel is exactly as tall as the groups actually in use.
+        self.slot_tones = list(styles.DEFAULT_SLOTS) + [styles.NONE_LABEL]
+        self.slot_tones = self.slot_tones[:styles.MAX_SLOTS]
+        while len(self.slot_tones) < styles.MAX_SLOTS:
+            self.slot_tones.append(styles.NONE_LABEL)
+        self._dds: list = []
+        self._dd_boxes: list = []       # the flat fields the dropdowns are drawn into
+        self._rows: list = []
+        self._fixed: list = []          # (control, x, dy_from_top, w, h) — the rows above
+        self._group_top = 0             # where the first group starts, from the top
+        self._title_h = 28              # measured right after the panel is built
+        self._win_h = 0.0               # WeChat's window height, learned from applyPosition_
+        self.cand_texts: list[str | None] = [None] * (styles.MAX_SLOTS * styles.PER_TONE)
         self._last_intent = ""          # kept so a tone change can re-rank without re-judging
-        self.candidates: list[str] = []
+
         self._busy = False
         self._collapsed = False
         self._expanded_h = None       # full height, captured the first time we collapse
@@ -168,13 +185,22 @@ class HudController(NSObject):
         self.panel.setBecomesKeyOnlyIfNeeded_(True)
 
         view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, PANEL_H))
+        # Paint the panel colour on the view itself rather than leaning on the window's
+        # background colour: _relayout() grows and shrinks this view, and a region that
+        # appears after a resize is not reliably covered by the window behind it. It also
+        # makes offscreen renders (cacheDisplayInRect_) show what the screen shows — a
+        # transparent view renders black there and hides real layout problems.
+        view.setWantsLayer_(True)
+        view.layer().setBackgroundColor_(PALETTE["bg"].CGColor())
         self.rows: dict[str, NSTextField] = {}
 
         # Layout order matters: the message being judged is the anchor of the panel,
         # so it sits right under the title in the brightest, largest type.
         # The full-width rows (PANEL_W - 28 = 332 px) cannot clip their widest string:
         # "意图识别率 100%" measures 103 px at 12 pt.
-        y = PANEL_H - 30
+        # Every control is created once and then placed by _relayout(), which is what lets
+        # the panel change height when the tone selection changes.
+        dy = 30
         for key, size, color, bold, height in (
             ("chat", 12, PALETTE["green"], True, 18),      # 群名 / 联系人
             ("status", 10, PALETTE["muted"], False, 14),
@@ -185,71 +211,159 @@ class HudController(NSObject):
             ("risk", 14, PALETTE["green"], True, 20),
             ("actions", 13, PALETTE["text"], False, 18),
         ):
-            tf = self._make_label(14, y - height, PANEL_W - 28, height,
+            tf = self._make_label(14, 0, PANEL_W - 28, height,
                                   size=size, color=color, bold=bold)
             if key == "message":
                 tf.cell().setWraps_(True)
             view.addSubview_(tf)
             self.rows[key] = tf
-            y -= height + 8
+            self._fixed.append((tf, 14, dy, PANEL_W - 28, height))
+            dy += height + 8
 
         # ---- candidates section
-        y -= 6
-        header = self._make_label(14, y - 16, PANEL_W - 28, 16,
+        dy += 6
+        header = self._make_label(14, 0, PANEL_W - 28, 16,
                                   size=11, color=PALETTE["muted"])
         header.setStringValue_("候选回复（按合适度排序）")
         view.addSubview_(header)
         self.rows["cand_header"] = header
-        y -= 22
+        self._fixed.append((header, 14, dy, PANEL_W - 28, 16))
+        dy += 22
+        self._group_top = dy
 
-        self.cand_rows = []
-        for i in range(N_CANDIDATES):
-            prob = self._make_label(CAND_PROB_X, y - 14, CAND_PROB_W, 14,
-                                    size=11, color=PALETTE["muted"])
-            view.addSubview_(prob)
-            text = self._make_label(CAND_TEXT_X, y - CAND_TEXT_H, CAND_TEXT_W, CAND_TEXT_H,
-                                    size=12, color=PALETTE["text"])
-            text.cell().setWraps_(True)
-            view.addSubview_(text)
-            copy_btn = self._make_button(CAND_BTN_X, y - 34, CAND_BTN_W, CAND_BTN_H,
-                                         "复制", "copyCandidate:", i)
-            fill_btn = self._make_button(CAND_BTN_X + CAND_BTN_W + CAND_BTN_GAP, y - 34,
-                                         CAND_BTN_W, CAND_BTN_H, "填入", "fillCandidate:", i)
-            view.addSubview_(copy_btn)
-            view.addSubview_(fill_btn)
-            self.cand_rows.append({"prob": prob, "text": text, "btn": copy_btn,
-                                   "fill_btn": fill_btn})
-            y -= 56
-
-        # ---- 话术 pickers, stacked under the candidate list. Each row is "#N" plus a
-        # dropdown: the rank here is the *slot*, not the displayed order — the local model
-        # re-sorts the candidates by suitability afterwards, so slot 1 does not have to end
-        # up on top. The third row starts on 不用, which is how the panel opens with two.
-        y -= 8
+        # ---- 话术 groups: each dropdown heads a group and its candidates sit underneath,
+        # so the tone is labelled by the thing that selects it. Every group's controls exist
+        # from the start; _relayout() decides which are on screen. The button tags are slot
+        # arithmetic (slot * PER_TONE + row) so they never shift when a group's results are
+        # still in flight.
         tone_items = styles.labels() + [styles.NONE_LABEL]
-        tone_defaults = list(styles.DEFAULT_SLOTS) + [styles.NONE_LABEL]
-        for i in range(styles.MAX_SLOTS):
-            rank = self._make_label(TONE_RANK_X, y - TONE_POP_H + 5, TONE_RANK_W, 14,
-                                    size=11, color=PALETTE["muted"])
-            rank.setStringValue_(f"#{i + 1}")
-            view.addSubview_(rank)
+        for slot in range(styles.MAX_SLOTS):
+            # the field the popup sits in: a flat surface with a hairline, drawn by us so
+            # the control carries no system-accent chrome
+            box = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, TONE_DD_W, TONE_DD_H))
+            box.setWantsLayer_(True)
+            box.layer().setBackgroundColor_(PALETTE["field"].CGColor())
+            box.layer().setBorderColor_(PALETTE["edge"].CGColor())
+            box.layer().setBorderWidth_(1.0)
+            box.layer().setCornerRadius_(5.0)
+            view.addSubview_(box)
+            self._dd_boxes.append(box)
+
             pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                NSMakeRect(TONE_POP_X, y - TONE_POP_H, TONE_POP_W, TONE_POP_H), False)
-            pop.setFont_(NSFont.systemFontOfSize_(11))
-            pop.setControlSize_(AppKit.NSControlSizeSmall)
+                NSMakeRect(0, 0, TONE_DD_W - 2 * TONE_DD_INSET, TONE_DD_H), False)
+            pop.setBordered_(False)          # <- no bezel, no accent-coloured chevron
+            pop.setFont_(NSFont.systemFontOfSize_(TONE_DD_FONT))
             pop.addItemsWithTitles_(tone_items)
-            pop.selectItemWithTitle_(
-                tone_defaults[i] if i < len(tone_defaults) else styles.NONE_LABEL)
+            pop.selectItemWithTitle_(self.slot_tones[slot])
             pop.setTarget_(self)
             pop.setAction_("toneChanged:")
             view.addSubview_(pop)
-            self._tone_pops.append(pop)
-            y -= TONE_POP_H + TONE_POP_GAP
+            self._dds.append(pop)
+
+            slot_rows = []
+            for row in range(styles.PER_TONE):
+                tag = slot * styles.PER_TONE + row
+                prob = self._make_label(CAND_PROB_X, 0, CAND_PROB_W, 14,
+                                        size=11, color=PALETTE["muted"])
+                text = self._make_label(CAND_TEXT_X, 0, CAND_TEXT_W, CAND_TEXT_H,
+                                        size=12, color=PALETTE["text"])
+                text.cell().setWraps_(True)
+                copy_btn = self._make_button(CAND_BTN_X, 0, CAND_BTN_W, CAND_BTN_H,
+                                             "复制", "copyCandidate:", tag)
+                fill_btn = self._make_button(CAND_BTN_X + CAND_BTN_W + CAND_BTN_GAP, 0,
+                                             CAND_BTN_W, CAND_BTN_H, "填入", "fillCandidate:", tag)
+                for c in (prob, text, copy_btn, fill_btn):
+                    view.addSubview_(c)
+                slot_rows.append({"prob": prob, "text": text,
+                                  "btn": copy_btn, "fill_btn": fill_btn})
+            self._rows.append(slot_rows)
 
         self.panel.setContentView_(view)
+        self._title_h = self.panel.frame().size.height - PANEL_H   # measured, not assumed
+        self._relayout()
         self.rows["status"].setStringValue_("等待微信消息…")
         self._wire_window_controls()
         self._install_status_item()
+
+    @objc.python_method
+    def _slot_active(self, slot: int) -> bool:
+        return self.slot_tones[slot] in styles.PRESETS
+
+    @objc.python_method
+    def _target_height(self) -> float:
+        """How tall the panel wants to be: WeChat's window height, capped to the screen.
+
+        Matching WeChat's height makes the panel and the window read as one unit instead of
+        a short box floating beside a tall one (the panel's top edge is aligned to WeChat's
+        either way, so equal heights also mean equal bottoms). The cap keeps a maximised
+        WeChat from pushing the panel off the bottom of the display.
+
+        Content is still laid out from the top, so what this adds is space *below* the
+        candidates — never a gap in the middle.
+        """
+        if self._win_h <= 0:
+            return 0.0
+        visible = 0.0
+        for screen in NSScreen.screens():
+            visible = max(visible, screen.visibleFrame().size.height)
+        # minus the title bar: this returns a CONTENT height, and it is the whole window
+        # (title bar included) that should be as tall as WeChat's — otherwise the panel's
+        # bottom edge hangs a title bar below WeChat's
+        target = min(self._win_h, visible - 24) if visible else self._win_h
+        return max(0.0, target - self._title_h)
+
+    @objc.python_method
+    def _relayout(self):
+        """Place every control for the current tone selection and size the panel to fit.
+
+        Two things are computed here rather than at build time. Positions are measured from
+        the TOP, so when the panel grows or shrinks nothing above the change moves — only the
+        bottom edge does. And the height follows the groups in use: a slot on 不用 reserves
+        neither a dropdown's worth of rows nor its candidates, which is what removes the dead
+        space a fixed-height panel left in the middle.
+        """
+        dy = self._group_top
+        placements = []          # (control, x, dy_from_top, w, h)
+        for slot in range(styles.MAX_SLOTS):
+            placements.append((self._dd_boxes[slot], TONE_DD_X, dy, TONE_DD_W, TONE_DD_H))
+            placements.append((self._dds[slot], TONE_DD_X + TONE_DD_INSET, dy,
+                               TONE_DD_W - 2 * TONE_DD_INSET, TONE_DD_H))
+            dy += TONE_DD_H + TONE_DD_GAP
+            active = self._slot_active(slot)
+            for row in range(styles.PER_TONE):
+                r = self._rows[slot][row]
+                controls = (r["prob"], r["text"], r["btn"], r["fill_btn"])
+                if active:
+                    # row height is reserved whether or not the candidates have arrived, so
+                    # nothing jumps when results land mid-generation
+                    placements += [
+                        (r["text"], CAND_TEXT_X, dy, CAND_TEXT_W, CAND_TEXT_H),
+                        (r["prob"], CAND_PROB_X, dy + 34, CAND_PROB_W, 14),
+                        (r["btn"], CAND_BTN_X, dy + 24, CAND_BTN_W, CAND_BTN_H),
+                        (r["fill_btn"], CAND_BTN_X + CAND_BTN_W + CAND_BTN_GAP, dy + 24,
+                         CAND_BTN_W, CAND_BTN_H),
+                    ]
+                    dy += CAND_ROW_H
+                else:
+                    for c in controls:
+                        c.setHidden_(True)
+            if slot < styles.MAX_SLOTS - 1:
+                dy += GROUP_GAP
+
+        content_h = max(dy + BOTTOM_PAD, self._target_height())
+        view = self.panel.contentView()
+        view.setFrameSize_(NSMakeSize(PANEL_W, content_h))
+        for ctrl, x, top, w, h in placements + self._fixed:
+            ctrl.setFrame_(NSMakeRect(x, content_h - top - h, w, h))
+
+        # resize the window with its TOP edge pinned: growing downwards is what the eye
+        # expects here, and _position_near() anchors the panel to WeChat's top anyway
+        f = self.panel.frame()
+        top = f.origin.y + f.size.height
+        frame_h = content_h + self._title_h
+        self.panel.setFrame_display_(
+            NSMakeRect(f.origin.x, top - frame_h, PANEL_W, frame_h), True)
+        self._expanded_h = frame_h
 
     @objc.python_method
     def _wire_window_controls(self):
@@ -344,28 +458,51 @@ class HudController(NSObject):
             tf.setTextColor_(color)
 
     @objc.python_method
-    def _render_candidates(self, ranked: list[dict]):
-        self.candidates = [r["text"] for r in ranked]
-        for i, row in enumerate(self.cand_rows):
-            if i < len(ranked):
-                r = ranked[i]
-                row["prob"].setStringValue_(f"#{i + 1} · {r['prob'] * 100:.0f}%")
-                row["text"].setStringValue_(r["text"])
-                row["btn"].setHidden_(False)
-                row["fill_btn"].setHidden_(False)
-            else:
-                row["prob"].setStringValue_("")
-                row["text"].setStringValue_("")
-                row["btn"].setHidden_(True)
-                row["fill_btn"].setHidden_(True)
+    def _row_controls(self, slot: int, row: int):
+        r = self._rows[slot][row]
+        return (r["prob"], r["text"], r["btn"], r["fill_btn"])
+
+    @objc.python_method
+    def _render_groups(self, payload: list):
+        """payload: [(slot, tone, [{"text","prob"}, ...]), ...] — one entry per active tone.
+
+        Rows the model did not fill are emptied and their buttons hidden, but the row keeps
+        its space: the panel's height is decided by the tone selection, not by how many lines
+        came back, so a late result cannot resize the panel under the cursor.
+        """
+        wanted = set()
+        for slot, _tone, items in payload:
+            for row in range(styles.PER_TONE):
+                if row < len(items):
+                    it = items[row]
+                    wanted.add((slot, row))
+                    r = self._rows[slot][row]
+                    r["prob"].setStringValue_(f"#{row + 1} · {it['prob'] * 100:.0f}%")
+                    r["text"].setStringValue_(it["text"])
+                    for c in self._row_controls(slot, row):
+                        c.setHidden_(not self._slot_active(slot))
+                    self.cand_texts[slot * styles.PER_TONE + row] = it["text"]
+        for slot in range(styles.MAX_SLOTS):
+            for row in range(styles.PER_TONE):
+                if (slot, row) not in wanted and self._slot_active(slot):
+                    r = self._rows[slot][row]
+                    r["prob"].setStringValue_("")
+                    r["text"].setStringValue_("")
+                    r["btn"].setHidden_(True)
+                    r["fill_btn"].setHidden_(True)
+                    self.cand_texts[slot * styles.PER_TONE + row] = None
+        self._relayout()
 
     @objc.python_method
     def _clear_candidates(self):
-        for row in self.cand_rows:
-            row["prob"].setStringValue_("")
-            row["text"].setStringValue_("")
-            row["btn"].setHidden_(True)
-            row["fill_btn"].setHidden_(True)
+        for slot in range(styles.MAX_SLOTS):
+            for row in range(styles.PER_TONE):
+                r = self._rows[slot][row]
+                r["prob"].setStringValue_("")
+                r["text"].setStringValue_("")
+                r["btn"].setHidden_(True)
+                r["fill_btn"].setHidden_(True)
+                self.cand_texts[slot * styles.PER_TONE + row] = None
 
     @objc.python_method
     def _display_height(self) -> float:
@@ -439,19 +576,20 @@ class HudController(NSObject):
 
     # ------------------------------------------------------------ actions
     def copyCandidate_(self, sender):
-        idx = sender.tag()
-        if 0 <= idx < len(self.candidates):
-            pb = NSPasteboard.generalPasteboard()
-            pb.clearContents()
-            pb.setString_forType_(self.candidates[idx], NSPasteboardTypeString)
-            self._render("status", f"已复制候选 #{idx + 1}", PALETTE["green"])
+        text = self.cand_texts[sender.tag()] if 0 <= sender.tag() < len(self.cand_texts) else None
+        if not text:
+            return
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(text, NSPasteboardTypeString)
+        self._render("status", "已复制", PALETTE["green"])
 
     def fillCandidate_(self, sender):
-        """Paste the candidate into WeChat's input box (src/fill.py)."""
+        """Write the candidate into WeChat's input box (src/fill.py)."""
         idx = sender.tag()
-        if not 0 <= idx < len(self.candidates):
+        text = self.cand_texts[idx] if 0 <= idx < len(self.cand_texts) else None
+        if not text:
             return
-        text = self.candidates[idx]
         # The status line is painted before the call because writing into WeChat takes a
         # beat; the click should look instant even though the write has not happened yet.
         self._render("status", "填入中…", PALETTE["muted"])
@@ -461,17 +599,19 @@ class HudController(NSObject):
             fill.request_accessibility()
         ok, reason = fill.fill_text(text)
         if ok:
-            self._render("status", f"已填入候选 #{idx + 1}", PALETTE["green"])
+            self._render("status", "已填入", PALETTE["green"])
         else:
             self._render("status", f"填入失败：{reason}", PALETTE["red"])
 
     def toneChanged_(self, sender):
         """A 话术 dropdown moved: the verdict is still valid, only the writing changes."""
-        picked = [p.titleOfSelectedItem() or styles.NONE_LABEL for p in self._tone_pops]
-        ids = styles.resolve(picked)      # drops 不用 and de-duplicates the three slots
-        if ids == self.tones:
+        picked = [p.titleOfSelectedItem() or styles.NONE_LABEL for p in self._dds]
+        if picked == self.slot_tones:
             return
-        self.tones = ids
+        self.slot_tones = picked
+        # the panel is sized by how many slots are in use, so re-lay-out *before* the new
+        # candidates arrive: the empty rows appear at once and nothing jumps later
+        self._clear_candidates()
         self._regenerate()
 
     @objc.python_method
@@ -481,37 +621,65 @@ class HudController(NSObject):
         No re-judging and no re-reading of the screen: the intent and risk do not depend on
         the tone, and re-running them would make a dropdown click feel like a new analysis.
         """
+        self._relayout()
         text = self.analyzed_text
         if not text:
             self._render("status", "话术已选 · 下条消息生效", PALETTE["muted"])
             return
-        if not self.tones:
+        active = [t for t in self.slot_tones if t in styles.PRESETS]
+        if not active:
             self._render("status", "没选话术 · 至少选一个", PALETTE["amber"])
             return
-        self._render("status", f"换话术中…（{'、'.join(self.tones)}）", PALETTE["muted"])
+        self._render("status", f"换话术中…（{'、'.join(active)}）", PALETTE["muted"])
         self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
         threading.Thread(target=self._regen_work,
-                         args=(text, self._last_intent, list(self.tones)),
+                         args=(text, self._last_intent, list(self.slot_tones)),
                          daemon=True).start()
 
     @objc.python_method
-    def _regen_work(self, text: str, intent: str, tones: list[str]):
+    def _grouped_payload(self, gen: dict, message: str, intent: str):
+        """Generation result -> [(slot, tone, items)], with each group ranked.
+
+        One ranking pass covers every candidate the requests produced, and each group is then
+        ordered by that shared score. So `#1`/`#2` inside a group means "the better of these
+        two", not "whichever line the model wrote first" — and it costs one forward pass
+        rather than one per tone.
+        """
+        groups = [g for g in (gen.get("groups") or []) if g.get("texts")]
+        if not groups:
+            return None, (gen.get("error") or "空结果")
+        texts = [t for g in groups for t in g["texts"]]
+        scores: dict[str, float] = {}
+        if intent:
+            try:
+                scores = {r["text"]: r["prob"] for r in
+                          self.judge.rank_candidates(message, intent, texts)}
+            except Exception:
+                scores = {}
+        payload = []
+        for g in groups:
+            items = [{"text": t, "prob": scores.get(t, 0.0)} for t in g["texts"]]
+            items.sort(key=lambda x: -x["prob"])
+            payload.append((g["slot"], g["tone"], items))
+        return payload, ""
+
+    @objc.python_method
+    def _regen_work(self, text: str, intent: str, slot_tones: list[str]):
         try:
-            gen = self.generator.generate(text, intent, tones)
-            texts = [c["text"] for c in gen.get("candidates", [])]
-            if not texts:
-                self._push("applyError:", f"候选生成失败: {gen.get('error', '空结果')[:60]}")
+            gen = self.generator.generate(text, intent, slot_tones)
+            payload, err = self._grouped_payload(gen, text, intent)
+            if payload is None:
+                self._push("applyError:", f"候选生成失败: {err[:60]}")
                 return
-            ranked = self.judge.rank_candidates(text, intent, texts) if intent else \
-                [{"text": t, "prob": 1.0 / len(texts)} for t in texts]
-            self._push("applyTones:", ranked)
+            self._push("applyTones:", payload)
         except Exception as e:
             self._push("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}")
 
-    def applyTones_(self, ranked):
+    def applyTones_(self, payload):
         self.rows["cand_header"].setStringValue_("候选回复（按合适度排序）")
-        self._render("status", f"已换话术 · {len(ranked)} 条", PALETTE["muted"])
-        self._render_candidates(ranked)
+        total = sum(len(items) for _s, _t, items in payload)
+        self._render("status", f"已换话术 · {total} 条", PALETTE["muted"])
+        self._render_groups(payload)
 
     # ------------------------------------------------------------ controls
     def collapsePanel_(self, sender):
@@ -551,18 +719,23 @@ class HudController(NSObject):
                       "cand_header"]   # "chat" and "status" survive collapsing
         for key in controlled:
             self.rows[key].setHidden_(collapsed)
-        for row in self.cand_rows:
-            for part in ("prob", "text", "btn", "fill_btn"):
-                if part == "btn":
-                    row["btn"].setHidden_(collapsed)
-                elif part == "fill_btn":
-                    row["fill_btn"].setHidden_(collapsed)
-                else:
-                    row[part].setHidden_(collapsed)
+        for slot in range(styles.MAX_SLOTS):
+            self._dds[slot].setHidden_(collapsed)
+            self._dd_boxes[slot].setHidden_(collapsed)
+            for row in range(styles.PER_TONE):
+                has = self.cand_texts[slot * styles.PER_TONE + row] is not None
+                for c in self._row_controls(slot, row):
+                    c.setHidden_(collapsed or not has)
+        if not collapsed:
+            # re-expanding puts every control back where _relayout() wants it, and re-hides
+            # the slots that are switched off — the collapse above cannot know that
+            self._relayout()
+            self._last_origin = None      # let the next tick re-dock cleanly
+            return
 
         rect = self.panel.frame()
-        # _expanded_h was captured once in init(); never re-derive it here, or expanding
-        # would read the collapsed height and stay collapsed
+        # _expanded_h is maintained by _relayout() (it changes with the tone selection), so
+        # expanding reads the current full height rather than a value captured at startup
         new_h = COLLAPSED_H if collapsed else (self._expanded_h or PANEL_H)
         self.panel.setFrame_display_(
             NSMakeRect(rect.origin.x, rect.origin.y + (rect.size.height - new_h),
@@ -640,7 +813,8 @@ class HudController(NSObject):
         with cf.ThreadPoolExecutor(max_workers=2) as ex:
             # generation does not need the intent, so it runs while judging; it does need the
             # chosen 话术, which is read here (a plain list read) and passed in
-            gen_future = ex.submit(self.generator.generate, newest.text, "", list(self.tones))
+            gen_future = ex.submit(self.generator.generate, newest.text, "",
+                                   list(self.slot_tones))
             verdict = None
             try:
                 verdict = self.judge.judge(newest.text, context=context)
@@ -653,19 +827,12 @@ class HudController(NSObject):
             except Exception as e:
                 self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
                 return
-            texts = [c["text"] for c in gen.get("candidates", [])]
-            if not texts:
-                self._push("applyError:", f"候选生成失败: {gen.get('error', '空结果')[:60]}")
+            intent = verdict["intent"] if verdict else ""
+            payload, err = self._grouped_payload(gen, newest.text, intent)
+            if payload is None:
+                self._push("applyError:", f"候选生成失败: {err[:60]}")
                 return
-            if verdict is not None:
-                try:
-                    ranked = self.judge.rank_candidates(newest.text, verdict["intent"], texts)
-                    self._push("applyCandidates:", ranked)
-                except Exception as e:
-                    self._push("applyError:", f"排序失败: {type(e).__name__}: {str(e)[:40]}")
-            else:
-                self._push("applyCandidates:", [{"text": t, "prob": 1.0 / len(texts)}
-                                                for t in texts])
+            self._push("applyCandidates:", payload)
 
     @objc.python_method
     def _push(self, selector: str, payload=None):
@@ -728,9 +895,9 @@ class HudController(NSObject):
         self._render("actions", " · ".join(v.get("actions", [])), PALETTE["text"])
         self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
 
-    def applyCandidates_(self, ranked):
+    def applyCandidates_(self, payload):
         self.rows["cand_header"].setStringValue_("候选回复（按合适度排序）")
-        self._render_candidates(ranked)
+        self._render_groups(payload)
 
     def applyError_(self, text):
         self._show()                       # never vanish without telling the user why
@@ -743,6 +910,10 @@ class HudController(NSObject):
             self.panel.orderOut_(None)
 
     def applyPosition_(self, win):
+        # WeChat's window height decides how tall the panel is (see _target_height), so
+        # a resize of the chat window is a layout change, not just a reposition
+        self._win_h = float(win.get("h") or 0)
+        self._relayout()
         self._position_near(win)
 
 

@@ -20,6 +20,7 @@ leaves the machine — swap in a local model if that matters more than reply qua
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -41,20 +42,26 @@ DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com"
 MISSING_HINT = ("未配置生成层 Key：候选回复需要它，判断/风险不需要。"
                 "设置 OPENAI_API_KEY（或 ANTHROPIC_API_KEY）后重启，见 README 配置章节。")
 
-# {n} appears twice on purpose: the style list and the "exactly n lines" demand have to agree,
-# or the model pads the answer with a line of its own.
-PROMPT = """刚收到一条微信消息，你要帮我回。
+# One request per tone. {n} appears twice on purpose: the "exactly n lines" demand has to
+# agree with the count asked for, or the model pads the answer with a line of its own.
+#
+# The boldness line is what gives a tone its edges. Without it both replies sit at the same
+# safe distance and every tone reads a bit flat; with it the first is always something you
+# could send as-is and the second is where the persona gets to breathe. Measured on the
+# built-in tones: 卑微乙方's pair goes from two polite apologies to "收到收到…" plus
+# "您息怒我马上跪着改完给您磕头了", and 贴吧老哥 picks up "我自己看了都想删号".
+PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
 
 消息：「{message}」
 {intent_line}
-请写 {n} 条风格不同的回复候选：
-{styles}
+请写 {n} 条回复候选，语气统一成下面这一种，但两条的胆量要有差别：
+「{tone}」{instruction}
 
 硬性要求：
-- 每条不超过 30 个字，是直接能发出去的口吻，不要客套话、不要解释
-- 只说人话，像微信里打字的语气
+- 前一条稳妥、可以直接发出去；后一条把这个语气做足，更皮、更夸张一点也行
+- 每条不超过 30 个字，是微信里打字的语气，不要客套话、不要解释
 - 只输出 {n} 行，每行一条，不要编号、不要引号、不要任何前后缀
-- 不要写出风格名（不要写「贴吧老哥 v1.0：」这类前缀），直接从回复内容开始"""
+- 不要写出语气名称（不要写「{tone}：」这类前缀），直接从回复内容开始"""
 
 
 # The model is told not to label its lines, and usually complies — but "usually" is exactly
@@ -219,42 +226,54 @@ class Generator:
                 out.append(s.strip())
         return out
 
-    def generate(self, message: str, intent: str = "",
-                 tones: list[str] | None = None) -> dict:
-        """intent is optional so the caller can start this in parallel with judging.
-
-        `tones` is the 话术 the user picked in the panel; one candidate comes back per tone,
-        so the number of candidates follows the selection rather than a fixed 3.
-        """
-        ids = styles.resolve(tones if tones is not None else styles.DEFAULT_SLOTS)
-        if not ids:
-            return {"candidates": [], "error": "没有选择任何话术", "elapsed_s": 0.0}
-        n = len(ids)
+    def _one_tone(self, message: str, intent: str, tone: str) -> tuple[list[str], str]:
+        """One request for one tone. Returns (texts, error); never raises."""
         intent_line = f"判断出的意图：{intent}\n" if intent else ""
-        prompt = PROMPT.format(message=message, intent_line=intent_line, n=n,
-                               styles=styles.prompt_block(ids))
-        t0 = time.perf_counter()
-        if not self._creds_or_load()[1]:
-            return {"candidates": [], "error": MISSING_HINT, "elapsed_s": 0.0}
+        prompt = PROMPT_ONE.format(message=message, intent_line=intent_line,
+                                   n=styles.PER_TONE, tone=tone,
+                                   instruction=styles.PRESETS[tone])
         try:
             raw = self._call(prompt)
-            texts = self._parse(raw)[:n]
         except urllib.error.HTTPError as e:
             detail = e.read()[:160].decode(errors="replace")
-            return {"candidates": [],
-                    "error": f"HTTP {e.code} @ {self._last_url} — {detail}",
-                    "elapsed_s": time.perf_counter() - t0}
+            return [], f"HTTP {e.code} @ {self._last_url} — {detail}"
         except Exception as e:
-            return {"candidates": [], "error": f"{type(e).__name__}: {e}",
-                    "elapsed_s": time.perf_counter() - t0}
+            return [], f"{type(e).__name__}: {e}"
+        return self._parse(raw)[:styles.PER_TONE], ""
 
-        seen, uniq = set(), []
-        for t in texts:
-            if t not in seen:
-                seen.add(t)
-                uniq.append({"text": t})
-        base, key, model = self._creds_or_load()  # noqa: F841
-        return {"candidates": uniq, "model": model,
+    def generate(self, message: str, intent: str = "",
+                 slot_tones: list[str] | None = None) -> dict:
+        """One concurrent request per selected 话术; returns the candidates grouped by tone.
+
+        A tone gets its own request rather than one request listing every tone: asking a
+        single call for "2 in this voice and 2 in that voice" makes the voices bleed into
+        each other, and it makes the response harder to split back into groups. Three
+        requests in flight together cost about as long as the slowest one.
+
+        `slot_tones` is the panel's per-slot selection (styles.NONE_LABEL marks an unused
+        slot). Two slots holding the same tone is allowed and simply runs it twice.
+        """
+        slots = list(slot_tones or (styles.DEFAULT_SLOTS + [styles.NONE_LABEL]))
+        active = [(i, t) for i, t in enumerate(slots) if t in styles.PRESETS]
+        if not active:
+            return {"groups": [], "error": "没有选择任何话术", "elapsed_s": 0.0}
+        if not self._creds_or_load()[1]:
+            return {"groups": [], "error": MISSING_HINT, "elapsed_s": 0.0}
+
+        t0 = time.perf_counter()
+        groups: list[dict] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as ex:
+            futures = {i: ex.submit(self._one_tone, message, intent, tone)
+                       for i, tone in active}
+            for i, tone in active:          # read in slot order, not completion order
+                try:
+                    texts, err = futures[i].result()
+                except Exception as e:      # defensive: _one_tone swallows its own errors
+                    texts, err = [], f"{type(e).__name__}: {e}"
+                groups.append({"slot": i, "tone": tone, "texts": texts, "error": err})
+
+        _base, _key, model = self._creds_or_load()
+        return {"groups": groups, "model": model,
                 "elapsed_s": time.perf_counter() - t0}
 
 
