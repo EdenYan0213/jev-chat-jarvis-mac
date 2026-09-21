@@ -244,6 +244,14 @@ uv run python src/judge_jev.py            # 判断层 TypeSafe 连通性
 
 已经做完、不用再做的（曾经列在这里）：候选回复生成 + 本地排序、`Judge.judge(context=...)` 的历史上下文（`src/hud.py` 已在传最近 4 条）、打包成 `.app`（用的是启动器包，不是 py2app——原因见「打包成 .app」一节）。
 
+## 交流反馈
+
+用着有问题、想提需求、或者想一起改，扫码进群：
+
+<img src="docs/wechat-group.png" width="200" alt="扫码加入微信交流群">
+
+> 微信群二维码**7 天后会失效**（微信的限制，不是仓库的问题）。过期了就在 issue 里说一声，会换一张。
+
 ## 许可
 
 MIT（见 `LICENSE`）。
