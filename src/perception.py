@@ -155,7 +155,17 @@ def capture_window(wid: int, out: Path) -> bool:
 # ----------------------------------------------------------------------------- ocr
 
 
-def ocr(path: Path, languages=("zh-Hans", "en-US"), chat_only: bool = True) -> list[TextBlock]:
+def ocr(path: Path, languages=("zh-Hans",), chat_only: bool = True) -> list[TextBlock]:
+    """Vision OCR over the chat pane.
+
+    zh-Hans alone: adding "en-US" bought nothing and cost time — on one screenshot the two
+    settings returned text identical *block for block* at 433 ms vs 303 ms, i.e. ~30% of the
+    OCR budget for no change in output. The zh-Hans model reads the Latin words that turn up
+    inside Chinese chat text (product names, URLs, "gpt"/"glm-4-fl") by itself.
+
+    Language correction stays ON (it costs ~30 ms more): it is what repairs ordinary OCR
+    slips such as 记亿力 for 记忆力, and one wrong character changes what the judge reads.
+    """
     import Vision
     from Foundation import NSURL
     from Quartz import CGRectMake

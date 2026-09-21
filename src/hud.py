@@ -145,6 +145,7 @@ class HudController(NSObject):
         self.last_analyze_ts = 0.0     # rate limit for analysis starts
         self.analyzed_text = None      # what the panel currently shows
         self._judged_once = False      # first judge call includes the local model load
+        self._read_once = False        # first OCR call includes Vision's own load
         self._last_skip_reason = None
         self.judge = make_judge()
         self.generator = Generator()
@@ -794,8 +795,13 @@ class HudController(NSObject):
             # only on arrival: this function runs every second, and a per-tick line would
             # bury the timing that matters
             t = res.get("timing_ms") or {}
+            first_read = not self._read_once
+            self._read_once = True
+            # Vision loads on the first call and costs ~2x steady state; saying so keeps a
+            # one-off from being read as a regression (same reason the judge line does it)
+            note = "（首次，含 Vision 加载）" if first_read and t.get("ocr", 0) > 400 else ""
             _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
-                 f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）")
+                 f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）{note}")
             _log(f"新消息 · 等停稳 {SETTLE_S}s 再分析（两次分析最小间隔 {MIN_GAP_S}s）")
             # keep the previous verdict readable; just badge that something new landed
             self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
