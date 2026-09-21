@@ -159,6 +159,11 @@ chmod +x "$APP/Contents/MacOS/jev-jarvis"
 
 echo "==> 生成图标"
 PY="$ROOT/.venv/bin/python"
+# a clean release worktree has no .venv: build one from the lockfile instead of
+# falling through to a bare python3 (no pyobjc there, and the icon step fails muted)
+if ! [ -x "$PY" ] && command -v uv >/dev/null 2>&1; then
+    (cd "$ROOT" && uv sync --quiet)
+fi
 [ -x "$PY" ] || PY="$(command -v python3)"
 "$PY" "$ROOT/packaging/make_icon.py" "$APP/Contents/Resources/AppIcon.iconset" 2>/dev/null \
   && iconutil -c icns "$APP/Contents/Resources/AppIcon.iconset" \
