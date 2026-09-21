@@ -109,9 +109,11 @@ CAND_TEXT_X = CAND_PROB_X + CAND_PROB_W + 8                    # 106
 CAND_TEXT_W = CAND_BTN_X - CAND_TEXT_X - 8                     # 128
 CAND_TEXT_H = 48                                                # up to 3 wrapped lines
 
-# 话术 pickers: one per candidate slot, three across the panel's usable width
-# (14 + 106 + 7 + 106 + 7 + 106 = 346 = PANEL_W - 14, the same right margin as everything else)
-TONE_POP_X, TONE_POP_W, TONE_POP_H, TONE_POP_GAP = 14, 106, 24, 7
+# 话术 pickers: three stacked rows under the candidate list, each one labelled #1/#2/#3 —
+# its rank prefix sits in the left column, the dropdown takes the rest of the width
+# (14 + 26 + 6 + 300 = 346 = PANEL_W - 14, the same right margin as everything else)
+TONE_RANK_X, TONE_RANK_W = 14, 26
+TONE_POP_X, TONE_POP_W, TONE_POP_H, TONE_POP_GAP = 46, 300, 24, 6
 
 
 class HudController(NSObject):
@@ -200,25 +202,6 @@ class HudController(NSObject):
         self.rows["cand_header"] = header
         y -= 22
 
-        # ---- 话术 pickers: one per candidate slot, so up to 3 tones at once. The third
-        # slot starts on 不用, which is how the panel opens with two candidates by default.
-        tone_items = styles.labels() + [styles.NONE_LABEL]
-        tone_defaults = list(styles.DEFAULT_SLOTS) + [styles.NONE_LABEL]
-        for i in range(styles.MAX_SLOTS):
-            pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                NSMakeRect(TONE_POP_X + i * (TONE_POP_W + TONE_POP_GAP),
-                           y - TONE_POP_H, TONE_POP_W, TONE_POP_H), False)
-            pop.setFont_(NSFont.systemFontOfSize_(11))
-            pop.setControlSize_(AppKit.NSControlSizeSmall)
-            pop.addItemsWithTitles_(tone_items)
-            pop.selectItemWithTitle_(
-                tone_defaults[i] if i < len(tone_defaults) else styles.NONE_LABEL)
-            pop.setTarget_(self)
-            pop.setAction_("toneChanged:")
-            view.addSubview_(pop)
-            self._tone_pops.append(pop)
-        y -= TONE_POP_H + 8
-
         self.cand_rows = []
         for i in range(N_CANDIDATES):
             prob = self._make_label(CAND_PROB_X, y - 14, CAND_PROB_W, 14,
@@ -237,6 +220,31 @@ class HudController(NSObject):
             self.cand_rows.append({"prob": prob, "text": text, "btn": copy_btn,
                                    "fill_btn": fill_btn})
             y -= 56
+
+        # ---- 话术 pickers, stacked under the candidate list. Each row is "#N" plus a
+        # dropdown: the rank here is the *slot*, not the displayed order — the local model
+        # re-sorts the candidates by suitability afterwards, so slot 1 does not have to end
+        # up on top. The third row starts on 不用, which is how the panel opens with two.
+        y -= 8
+        tone_items = styles.labels() + [styles.NONE_LABEL]
+        tone_defaults = list(styles.DEFAULT_SLOTS) + [styles.NONE_LABEL]
+        for i in range(styles.MAX_SLOTS):
+            rank = self._make_label(TONE_RANK_X, y - TONE_POP_H + 5, TONE_RANK_W, 14,
+                                    size=11, color=PALETTE["muted"])
+            rank.setStringValue_(f"#{i + 1}")
+            view.addSubview_(rank)
+            pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(TONE_POP_X, y - TONE_POP_H, TONE_POP_W, TONE_POP_H), False)
+            pop.setFont_(NSFont.systemFontOfSize_(11))
+            pop.setControlSize_(AppKit.NSControlSizeSmall)
+            pop.addItemsWithTitles_(tone_items)
+            pop.selectItemWithTitle_(
+                tone_defaults[i] if i < len(tone_defaults) else styles.NONE_LABEL)
+            pop.setTarget_(self)
+            pop.setAction_("toneChanged:")
+            view.addSubview_(pop)
+            self._tone_pops.append(pop)
+            y -= TONE_POP_H + TONE_POP_GAP
 
         self.panel.setContentView_(view)
         self.rows["status"].setStringValue_("等待微信消息…")
