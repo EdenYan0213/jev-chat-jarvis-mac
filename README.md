@@ -4,7 +4,7 @@
 
 Mac 版 V0：**纯只读、零封号风险**——不注入、不 hook、不解密数据库，只是「看屏幕 + 本地模型判断」。
 
-![演示：微信群消息进来 → 面板给出意图、风险分级与三条候选回复 → 点「填入」直接进微信输入框](docs/demo.gif)
+![演示：微信群消息进来 → 面板给出意图、风险分级与候选回复 → 点「填入」直接进微信输入框](docs/demo.gif)
 
 ## 交流反馈
 
@@ -14,32 +14,24 @@ Mac 版 V0：**纯只读、零封号风险**——不注入、不 hook、不解�
 
 ## 现在能做什么
 
-- 抓取微信窗口并 OCR 聊天区（中文、左右分句、群聊发送者；微信不在前台也能抓）
-- 判断意图（派活/催进度/问进度/批评/要解释/闲聊/约会议/夸奖）：零样本 **86.4%**（22 条实测）
-- 风险分级 0–9 + 行动建议（本地模型一次前向出全部分布）
-- **候选回复**：按选中的「话术」生成（内置 9 种、最多同时 3 种并发请求）→ 本地模型排序（能压掉踩雷选项）
-- 防刷屏：消息停稳 1.2 s 才分析、两次分析最小间隔 2 s；分析期间读屏不中断
-- 悬浮窗跟随微信窗口（非激活 NSPanel 不抢焦点，多显示器不跳屏），微信关闭自动隐藏
-- 「复制」进剪贴板 / 「填入」直接写进微信输入框（走辅助功能接口；输入框里已有你打的字时**追加**不覆盖，写完读回确认，失败如实报）
+- **意图 + 风险**：8 类意图零样本 **86.4%**（22 条实测），风险 0–9 分级 + 行动建议，本地模型一次前向出全分布
+- **候选回复**：按选中的「话术」生成（内置 10 种、最多 3 种并发、keep-alive 复用连接）→ 先上屏（流式端点逐行、其余整包，标「排序中」）→ 本地模型排序后原位重排，压掉踩雷选项
+- **YOLO 检测框**（可选）：把每次 OCR 命中的消息实时框在微信窗口上——对方/我/发送者分色 + 真实置信度，被判断那条带「意图·风险」标签；点击穿透、不进抓图。env 里 `JEV_BOXES=1` 启动即开，菜单栏 J 图标随时切换
+- **快**：消息一出现预判+生成同时起跑（latest-wins，刷屏中间态自动作废），停稳窗口把生成耗时整个藏进去
+- 防刷屏：消息停稳才分析（上限 1.2 s，连续 3 跳安静最早 ~0.7 s 开闸）、两次分析最小间隔 2 s；分析期间读屏不中断
+- 悬浮窗跟随微信窗口（非激活不抢焦点、多显示器不跳屏）；「复制」/「填入」走辅助功能接口，输入框已有字时**追加**不覆盖，写完读回确认
 
 ## 用法
 
-**只想用**：[Releases](https://github.com/jev-jarvis/jev-jarvis/releases) 下载 `.app`，解压拖进「应用程序」。**第一次打开要右键 → 打开**（没做 Apple 公证，直接双击会被 Gatekeeper 拦）。首次启动联网装依赖（约 3 秒），然后授予「屏幕录制」权限并**退出重开**。
+**只想用**：[Releases](https://github.com/jev-jarvis/jev-jarvis/releases) 下载 `.app`，解压拖进「应用程序」。**第一次打开要右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）；首次启动联网装依赖约 3 s，授予「屏幕录制」权限后**退出重开**。
 
-**从源码跑**（前提：微信在运行、终端已授予「屏幕录制」）：
-
-```bash
-./start.command
-```
-
-「填入」另需「辅助功能」权限，第一次点会弹系统授权框。单独测试各层：
+**从源码跑**（微信在运行、终端已授予「屏幕录制」）：`./start.command`。「填入」另需「辅助功能」权限，第一次点会弹系统授权框。分层自测：
 
 ```bash
-uv run python src/fill.py                        # 只查权限 + 微信状态
-uv run python src/fill.py "好的，马上"             # 真正填入
 uv run python src/perception.py                  # 感知层：识别到的消息 + 耗时
 uv run python src/judge.py "这个需求你今天跟一下"  # 单条消息出判断
 uv run python src/judge_zh_test.py               # 22 条中文意图回归
+uv run python src/generate.py --check            # 生成层凭据解析
 ```
 
 ## 面板读法
@@ -55,17 +47,16 @@ uv run python src/judge_zh_test.py               # 22 条中文意图回归
 ● 留神  4/9                                   ← 风险（绿 ≤3 / 橙 4–6 / 红 7–9）
 先给当前状态 · 给明确的完成时间                    ← 行动建议
 候选回复（按合适度排序）
-[高情商话术                  ▾]                 ← 一个话术一组，下拉框就是分组标题
+[高情商话术                  ▾]                 ← 下拉框可以换话术
     #1 · 94%  今天下班前给您初稿   [复制] [填入]
     #2 · 41%  我明早一上班就发您    [复制] [填入]
-[贴吧老哥 v1.0               ▾]                 ← 第二种话术
+[贴吧老哥 v1.0               ▾]                 ← 每种话术一组，各出 2 条
 [不用                        ▾]                 ← 第三个槽位自己选
 ```
 
-- 意图/风险先上屏（本地判断），候选后到（生成与判断并行，等排序后一起出）。
-- **每种话术出 2 条、故意一稳一放**：一条稳妥能直接发，一条把人设做足。改选话术立刻按当前消息重新生成。
-- 风险是 10 档概率分布的**加权平均取整**——实测分布平滑（最高档概率从不超 0.4），拿最高档当显示值会在意思相近的消息间乱跳，所以显示平均值。
-- **加自己的话术不用改代码**：在 `~/.config/jev-jarvis/env` 里加一行，`|` 分隔多条、每条「名字=说明」，同名覆盖内置，重启生效：
+- 意图/风险停稳即出（判断在停稳窗口里已提前算完）；候选随后上屏，排序完成后原位重排、补上百分比
+- **每种话术出 2 条、故意一稳一放**：一条稳妥能直接发，一条把人设做足；改选话术立刻按当前消息重新生成
+- **加自己的话术不用改代码**：`~/.config/jev-jarvis/env` 里加一行，`|` 分隔、每条「名字=说明」，同名覆盖内置，重启生效：
 
   ```bash
   export JEV_TONES="摸鱼大师=像资深摸鱼选手，把活推得漂亮又不失礼|孙子兵法=用兵法比喻说话，比如「先稳住阵脚」"
@@ -77,44 +68,33 @@ uv run python src/judge_zh_test.py               # 22 条中文意图回归
 
 | 指标 | 数值 |
 |---|---|
-| 轮询节奏 | **静止 0.25 s/跳、变化 1.0 s/跳**。每跳先抓图算聊天区指纹，和上一帧一样就整跳跳过 OCR——画面安静时发现新消息最多 0.25 s、CPU 约 15%；刷屏时退回 1 s 全量 OCR |
-| 捕获耗时 | **~5–25 ms**（进程内抓图）。接口偶尔拒绝（如屏幕休眠），自动回退 `screencapture` 子进程约 180 ms，日志会标注 |
-| OCR（只扫聊天区 ROI） | **~250 ms** 稳态；首次约 540 ms（Vision 加载）——启动预热的「空转一帧」就是把它提前吃掉 |
-| 判断（decider-2b 本地，MPS，float16） | **~0.8 s** 稳态；带 4 轮上下文约 1.1 s；冷启动加载约 9–10 s，已挪到启动后台预热，第一条消息不再等它 |
-| 候选生成（API，每话术一次并发调用） | ~0.5–1.1 s（DeepSeek deepseek-chat） |
-| 意图识别率（零样本，22 条中文职场消息） | **86.4%**（多数类基线 13.6%）※ |
-| 端到端：消息 → 出意图 | **~2.3 s**（检测 ≤0.25 s + 停稳 1.2 s + 判断 ~0.8 s）。实测「消息出现 → 开始分析」1.2–1.7 s（固定 1 s 轮询时为 2.0–2.3 s） |
-| 端到端：消息 → 出候选 | **~3.0 s**（生成与判断并行，之后串行排序 ~0.7 s） |
+| 轮询 | 静止 0.25 s/跳；变化后 0.45 s×3 跳再回 1 s。指纹相同整跳跳过 OCR，安静时新消息 ≤0.25 s 可见 |
+| 读屏 | 进程内抓图 ~5–25 ms（休眠回退子进程 ~180 ms）；OCR 1x 采集，合成图实测 2x ~140 → 1x ~100 ms、逐字一致 |
+| 判断 | ~0.8 s 稳态（回归口径 ~0.55 s/条）；线上带 2 轮上下文；冷启动 9–15 s 已挪到启动预热 |
+| 生成 | ~0.5–1.1 s（DeepSeek），流式首条 ~0.6 s；消息一到就起跑，通常藏在停稳窗口内 |
+| 意图识别率 | **86.4%**（22 条，多数类基线 13.6%）※ |
+| 端到端 | 出意图 ~1.5 s；出候选先上屏 ~1.5–2 s、排序完成再 +~0.5 s（优化前 ~3 s）※ |
 
-※ 86.4% 是**不带上下文**的回归口径（`src/judge_zh_test.py`）；线上判断还带最近 4 轮上下文，信息更多。改判断层 prompt 后别直接引用这个数，要么重跑、要么说明口径。
-
-**两段式排序的价值**：API 生成的候选里经常混着踩雷选项。实测「这做的什么玩意」（批评）生成了「哈哈，老板，我这就改！」，本地模型把它压到第 3（6.6%），把「对不起，我马上改！」排到第 1（57.7%）。
+※ 86.4% 是**无上下文**回归口径（`src/judge_zh_test.py`，直接 import 线上 prompt），22 条样本量不大，且错例集中在「催进度 vs 问进度」边界；改判断层 prompt 后必须重跑再引用。端到端优化后数值为机制推算，以日志实测为准。
 
 ## 配置
 
-**两层，两个 key，都可以不填**——判断层不填就是本地模型，功能照常。
+两层、两个 key、都可以不填——判断层不填就走本地 decider-2b（首次下载约 7 GB），功能照常；生成层不填候选区空着 + 启动弹窗提醒。
 
-| 层 | 干什么 | 用什么 | 不填 key 时 |
-|---|---|---|---|
-| **判断层** | 意图 + 风险 | TypeSafe Jev（无嘴模型，只出类型化概率） | 本地 decider-2b（首次下载约 7 GB） |
-| **生成层** | 写回复候选 | 任意 LLM（Jev 写不了文本，这层必须另配） | 候选区空着 + 启动弹窗提醒 |
-
-全部配置在一个 `env` 文件里（shell 格式，`KEY=值` 一行一个）。**不提供第二种配置文件格式**——两个能放同样设置的文件，就是你会去改那个没被读取的那一个。查找顺序：真实环境变量 > `$XDG_CONFIG_HOME/jev-jarvis/env` > `~/.config/jev-jarvis/env` > `~/Library/Application Support/jev-jarvis/env`：
+全部配置在一个 env 文件（shell 格式），**不提供第二种配置文件格式**。查找顺序：真实环境变量 > `$XDG_CONFIG_HOME/jev-jarvis/env` > `~/.config/jev-jarvis/env` > `~/Library/Application Support/jev-jarvis/env`：
 
 ```bash
 mkdir -p ~/.config/jev-jarvis
 cat > ~/.config/jev-jarvis/env <<'ENV'
-# ① 判断层（不填就用本地 decider-2b）
+# 判断层（可选）：TypeSafe Jev，不填用本地 decider-2b
 export TYPESAFE_API_KEY=""
-export TYPESAFE_BASE_URL="https://api.typesafe.ai"
-export TYPESAFE_MODEL="jev-latest"
 
-# ② 生成层 —— 任意 OpenAI 兼容端点
+# 生成层（要出候选就得填）：任意 OpenAI 兼容端点
 export OPENAI_API_KEY="sk-你的key"
 export OPENAI_BASE_URL="https://api.deepseek.com"
 export OPENAI_MODEL="deepseek-chat"
 
-# ③ 生成层的另一种写法 —— Anthropic 兼容端点（和 ② 二选一，都填时 ② 优先）
+# 或 Anthropic 兼容端点（二选一，都填时上面优先）
 # export ANTHROPIC_API_KEY=""
 # export ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic"
 # export ANTHROPIC_MODEL="glm-4-flash"
@@ -122,20 +102,16 @@ ENV
 chmod 600 ~/.config/jev-jarvis/env
 ```
 
-**凭据解析以 key 为准**：提供 key 的那个来源同时决定端点和模型，否则会拿着 A 家的 key 请求 B 家，401 得莫名其妙。
-
-Jev 没拿到名额可以走兼容网关（换 `TYPESAFE_BASE_URL`/`TYPESAFE_MODEL`）：OpenRouter `https://openrouter.ai/api/v1` + `typesafe/jev-1.13`；Vercel AI Gateway `https://ai-gateway.vercel.sh/typesafe` + `typesafe-ai/jev`；Opper `https://api.opper.ai/v3/compat` + `jev`。Jev 调用失败时自动回退本地模型并在面板标注。
-
-生成层实测可用的端点：DeepSeek `https://api.deepseek.com` + `deepseek-chat`（最快 ~0.7 s）；智谱 `https://open.bigmodel.cn/api/anthropic` + `glm-4-flash`；本地 Ollama `http://localhost:11434/v1` + `qwen2.5:7b`（完全不出网）。格式按 URL 自动识别。
-
-> **别用带思考（thinking）的推理模型**：思考会吃光 `max_tokens`，**候选区拿到 0 条文字**，面板只写「候选生成失败」——看起来像没生成，其实是模型选错了。DeepSeek 认准 `deepseek-chat`。
-
-自查（不打印完整 key）：`uv run python src/generate.py --check`（生成层）、`uv run python src/judge_jev.py`（判断层连通性）。不想把密钥落盘可以用钥匙串：`export OPENAI_API_KEY=$(security find-generic-password -s jev-jarvis -w)`。
+- **凭据解析以 key 为准**：提供 key 的来源同时决定端点和模型，否则拿着 A 家 key 请求 B 家，401 得莫名其妙
+- 实测可用端点：DeepSeek `https://api.deepseek.com` + `deepseek-chat`（最快 ~0.7 s）；智谱 `https://open.bigmodel.cn/api/anthropic` + `glm-4-flash`；本地 Ollama `http://localhost:11434/v1` + `qwen2.5:7b`（完全不出网）。Jev 网关：OpenRouter / Vercel AI Gateway / Opper（换 `TYPESAFE_BASE_URL`/`TYPESAFE_MODEL`），调用失败自动回退本地并在面板标注
+- **别用带思考（thinking）的模型**：思考吃光 `max_tokens`，候选 0 条，面板只报「候选生成失败」——DeepSeek 认准 `deepseek-chat`
+- 自查（不打印完整 key）：`uv run python src/generate.py --check`、`uv run python src/judge_jev.py`；不想落盘可用钥匙串 `security find-generic-password -s jev-jarvis -w`
+- 其它开关：`JEV_BOXES=1` 启动即打开 YOLO 检测框（默认关，菜单栏可切）；`JEV_TONES` 加自定义话术（见面板读法）
 
 ## 架构
 
 ```
-微信窗口 ──进程内抓图 CGImage（~25ms，休眠时回退 screencapture）──▶ Vision OCR（只扫聊天区 ROI）
+微信窗口 ──进程内抓图 CGImage（~25ms，休眠时回退 screencapture）──▶ Vision OCR（只扫聊天区 ROI，1x）
                                                                      │
                                                      过滤 UI 噪声 + 左右分句 + 发送者
                                                                      │
@@ -148,57 +124,30 @@ Jev 没拿到名额可以走兼容网关（换 `TYPESAFE_BASE_URL`/`TYPESAFE_MOD
                                     生成层 API 并发出候选 ──▶ 本地排序 ──▶ 悬浮窗 NSPanel
 ```
 
-- **每 0.25 s 抓一帧算指纹，没变就跳过 OCR**；变了才 OCR + 进入停稳流程。
-- **抓窗口而不是抓屏**：只取微信自己的内容，悬浮窗浮在上面也不污染 OCR，微信被挡住也能抓。
-- **本地推理用 float16，不要 bfloat16**：MPS 对 bf16 算子覆盖不全会走慢路径——同一模型实测 bf16 ~1.4 s vs fp16 ~0.75 s，准确率分毫不变。
-- **两层共用同一份上下文**：最近 4 轮、每轮带「谁说的」（群聊用昵称行，单聊用 我/对方），被判断那条不在自己的上下文里。
+- 每 0.25 s 抓帧算指纹，没变跳过 OCR；消息一出现，本地判断与生成**并行起跑**，停稳门只消费最新结果
+- 抓窗口而不是抓屏：只取微信自己的内容，悬浮窗浮在上面也不污染 OCR，微信被挡住也能抓
+- 本地推理用 float16（MPS 对 bf16 算子覆盖不全，实测慢 2 倍，准确率不变）；生成层上下文 4 轮、判断层 2 轮
 
-## 已知限制（V0 边界）
+## 已知限制 & 排查
 
-- 左右分句靠 x 坐标，非对称布局可能误判；图片/表情包消息读不出内容会跳过；引用回复当普通文本。
-- 微信改版会让布局常量失效（`src/perception.py` 顶部的 `CHAT_PANE_X_MIN` 等需重新校准）。
-- 判断模型冷启动加载约 10–20 s，已挪到启动时的后台预热（日志见「预热」行），不再压在第一条消息上。
-- 群里分享的公众号文章卡片会被当成消息去解读（感知层暂分不清，见「下一步」）。
-
-## 排查（觉得慢 / 不对）
-
-```bash
-tail -40 ~/Library/Logs/jev-jarvis.log   # 两种启动方式都写这里；不含消息正文和候选文字，可放心贴进 issue
-```
-
-```
-[00:00:00] 启动 · 判断层 本地 decider-2b · 生成层 https://api.deepseek.com / deepseek-chat
-[00:00:02] 预热 OCR 就绪 · 1596ms
-[00:00:15] 预热 判断模型就绪 · 总耗时 15118ms
-[00:59:04] 读屏 抓取 80ms + OCR 253ms = 333ms · 读到 6 条（对方 6 条）
-[00:59:05] 开始分析 · 这条消息出现到现在 1.3s
-[00:59:06] 判断 841ms → 派活 把握 52% 风险 5.3
-[00:59:07] 生成 1113ms · 2 个话术并发 → 4 条候选
-[00:59:07] 排序 590ms（本地模型，一次前向）
-[00:59:07] 端到端 2210ms · 从分析开始到候选上屏
-```
-
-**首条消息不再背冷启动**：启动时后台预热判断模型和 Vision（日志会有「预热 OCR 就绪」「预热 判断模型就绪」两行），预热完成前来的消息会等预热跑完再判断——同样的加载，只是提前发生。第二条起判断约 0.8 s。嫌冷启动慢就把判断层换成 TypeSafe Jev（走网络不加载本地模型）。
+- 左右分句靠 x 坐标，非对称布局可能误判；图片/表情包读不出内容；引用回复当普通文本；公众号文章卡片会被当消息解读
+- 微信改版会让布局常量失效（`src/perception.py` 顶部常量需重新校准）
+- 判断模型冷启动 10–20 s 已挪到启动后台预热；启动后第一条慢是正常现象。嫌冷启动慢就把判断层换 TypeSafe Jev（走网络不加载本地模型）
+- 觉得慢/不对先看日志（分阶段耗时、不含消息正文，可放心贴 issue）：`tail -40 ~/Library/Logs/jev-jarvis.log`
 
 ## 下一步（按优先级）
 
 1. **攒标注数据**：把误判的（尤其「催进度 vs 问进度」）记下来，微调冲 95%+。
-2. **候选生成改流式**：现在三条候选全部生成完才返回（~1.7 s），流式首字约 0.6 s 可上屏。改动在 `src/generate.py`（解析 SSE）与 `src/hud.py`（边到边显示）。
-3. **判断在停稳窗口里并行先跑**：消息一出现就本地预判、停稳确认没变直接用，可再省约 1 s（纯本地、不花钱；刷屏时多烧 CPU）。
-4. **推理模型失败提示说清楚**：检测到「只有思考没有正文」时直接提示换模型，而不是笼统的「候选生成失败」。
-5. **区分聊天消息和分享的文章卡片**：用「听全文」「阅读」等特征做保守过滤，风险是误杀正常消息。
+2. **区分聊天消息和分享的文章卡片**：用「听全文」「阅读」等特征做保守过滤，风险是误杀正常消息。
 
 ## 打包与发版（开发者）
 
 ```bash
-./packaging/build_app.sh        # 生成 ./jev-jarvis.app（约 400 KB 的启动器包）
-./packaging/release.sh          # -> dist/jev-jarvis-<版本>-macos.zip + SHA256SUMS
-./packaging/release.sh --publish  # 构建 + 解压回验 + 建 GitHub Release 上传（需 gh 已登录）
+./packaging/build_app.sh           # 生成 ./jev-jarvis.app（约 400 KB 启动器包，不冻结 torch）
+./packaging/release.sh --publish   # 干净 worktree 构建 + 解压回验 + gh release（需 gh 已登录）
 ```
 
-不冻结 torch 而是做「启动器包」（首次启动用 uv 建 venv，实测 3 秒），避免 2–4 GB 的怪物；包跟着仓库 `.python-version` 走（3.12），有独立 TCC 身份，`LSUIElement` 不占 Dock。版本号只有一处：`pyproject.toml` 的 `version`。发版从干净 worktree 构建。有开发者证书可加 `--sign "Developer ID Application: ..."`。
-
-窗口原生红绿灯：🔴 关闭=退出、🟡 最小化=收起/展开、🟢 缩放=隐藏；菜单栏 J 图标：显示/收起、暂停读屏、立即重新分析、退出。
+版本号只有 `pyproject.toml` 一处；包跟 `.python-version`（3.12）走，有独立 TCC 身份，`LSUIElement` 不占 Dock；无 Apple 公证，首次打开要教右键；有开发者证书可加 `--sign "Developer ID Application: ..."`。
 
 ## 许可与免责
 
