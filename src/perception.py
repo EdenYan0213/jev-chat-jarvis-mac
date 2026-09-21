@@ -155,23 +155,15 @@ def capture_window(wid: int, out: Path) -> bool:
 # ----------------------------------------------------------------------------- ocr
 
 
-def ocr(path: Path, languages=("zh-Hans",), chat_only: bool = True) -> list[TextBlock]:
-    """Vision OCR over the chat pane.
+def _vision_blocks(handler, languages, chat_only: bool) -> list[TextBlock]:
+    """Run one Vision text request against a handler that is already built.
 
-    zh-Hans alone: adding "en-US" bought nothing and cost time — on one screenshot the two
-    settings returned text identical *block for block* at 433 ms vs 303 ms, i.e. ~30% of the
-    OCR budget for no change in output. The zh-Hans model reads the Latin words that turn up
-    inside Chinese chat text (product names, URLs, "gpt"/"glm-4-fl") by itself.
-
-    Language correction stays ON (it costs ~30 ms more): it is what repairs ordinary OCR
-    slips such as 记亿力 for 记忆力, and one wrong character changes what the judge reads.
+    Shared by the file path and the in-memory path so the request settings — the part that
+    was measured and tuned — exist exactly once.
     """
     import Vision
-    from Foundation import NSURL
     from Quartz import CGRectMake
 
-    url = NSURL.fileURLWithPath_(str(path))
-    handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
     blocks: list[TextBlock] = []
 
     def completion(request, error):
@@ -212,6 +204,56 @@ def ocr(path: Path, languages=("zh-Hans",), chat_only: bool = True) -> list[Text
             b.w *= rw
             b.h *= rh
     return blocks
+
+
+def ocr(path: Path, languages=("zh-Hans",), chat_only: bool = True) -> list[TextBlock]:
+    """Vision OCR over the chat pane, from a PNG on disk.
+
+    zh-Hans alone: adding "en-US" bought nothing and cost time — on one screenshot the two
+    settings returned text identical *block for block* at 433 ms vs 303 ms, i.e. ~30% of the
+    OCR budget for no change in output. The zh-Hans model reads the Latin words that turn up
+    inside Chinese chat text (product names, URLs, "gpt"/"glm-4-fl") by itself.
+
+    Language correction stays ON (it costs ~30 ms more): it is what repairs ordinary OCR
+    slips such as 记亿力 for 记忆力, and one wrong character changes what the judge reads.
+
+    This is the fallback path; read_conversation() prefers the in-memory one.
+    """
+    import Vision
+    from Foundation import NSURL
+
+    url = NSURL.fileURLWithPath_(str(path))
+    handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
+    return _vision_blocks(handler, languages, chat_only)
+
+
+def capture_image(wid: int):
+    """The window's pixels as a CGImage, without leaving the process. None when refused.
+
+    Against `screencapture -l <wid>` writing a PNG, this is 4–29 ms versus 128–270 ms for the
+    same window with identical recognition results (10 blocks, same text) — the difference
+    being a subprocess spawn plus PNG encoding plus reading it back off disk. The capture
+    runs every second, so when it works the saving is continuous.
+
+    It does NOT always work: the same call returns NULL once the display is asleep, while
+    `screencapture` keeps producing images. So callers must treat None as "use the slow
+    route" rather than an error — read_conversation() does exactly that, and reports which
+    route it took so a permanent fallback is visible instead of just feeling slow.
+    """
+    import Quartz
+    try:
+        return Quartz.CGWindowListCreateImage(
+            Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow, wid,
+            Quartz.kCGWindowImageBoundsIgnoreFraming)
+    except Exception:
+        return None
+
+
+def ocr_image(image, languages=("zh-Hans",), chat_only: bool = True) -> list[TextBlock]:
+    """Same request as ocr(), fed a CGImage directly — no PNG encode, no temp file."""
+    import Vision
+    handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(image, None)
+    return _vision_blocks(handler, languages, chat_only)
 
 
 # ---------------------------------------------------------------------- extraction
@@ -342,13 +384,23 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None) -
     if win is None:
         return {"ok": False, "error": "WeChat main window not found", "messages": []}
 
-    with tempfile.TemporaryDirectory() as td:
-        png = Path(td) / "wechat.png"
-        if not capture_window(win.wid, png):
-            return {"ok": False, "error": "capture failed", "messages": []}
-        t_cap = time.perf_counter()
-        blocks = ocr(png)
+    # In-process capture + OCR off the CGImage is the fast path (~250 ms for the pair).
+    # The subprocess + PNG route stays as the fallback: it is ~150 ms slower, but it is the
+    # one that still worked when CGWindowListCreateImage had nothing to give.
+    image = capture_image(win.wid)
+    t_cap = time.perf_counter()
+    capture_path = "memory" if image is not None else "subprocess"
+    if image is not None:
+        blocks = ocr_image(image)
         t_ocr = time.perf_counter()
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            png = Path(td) / "wechat.png"
+            if not capture_window(win.wid, png):
+                return {"ok": False, "error": "capture failed", "messages": []}
+            t_cap = time.perf_counter()
+            blocks = ocr(png)
+            t_ocr = time.perf_counter()
 
     msgs = extract_messages(blocks, max_messages=max_messages)
     return {
@@ -358,7 +410,7 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None) -
                    "x": win.x, "y": win.y},
         "messages": msgs,
         "timing_ms": {"capture": (t_cap - t0) * 1000, "ocr": (t_ocr - t_cap) * 1000,
-                      "total": (t_ocr - t0) * 1000},
+                      "total": (t_ocr - t0) * 1000, "capture_path": capture_path},
         "n_blocks": len(blocks),
     }
 
