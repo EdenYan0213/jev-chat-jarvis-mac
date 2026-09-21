@@ -19,6 +19,7 @@ Design notes
 from __future__ import annotations
 
 import objc
+import os
 import subprocess
 import threading
 import time
@@ -124,16 +125,34 @@ GROUP_GAP = 12            # between one group's rows and the next group's dropdo
 BOTTOM_PAD = 18           # below the last group
 
 
+LOG_PATH = Path.home() / "Library" / "Logs" / "jev-jarvis.log"
+
+
 def _log(msg: str) -> None:
-    """One line per stage, to stdout — which the .app launcher redirects into
-    ~/Library/Logs/jev-jarvis.log (and `./start.command` shows in the terminal).
+    """One line per stage: to stdout, and into ~/Library/Logs/jev-jarvis.log.
 
     "It feels slow" is not actionable on its own, so every analysis prints what each stage
     cost; that is the whole point of this function. Deliberately **no message text and no
     candidate text**: this file is meant to be pasted into an issue, and the app's premise
     is that chat content stays on the machine.
+
+    Both destinations on purpose: the .app launcher already redirects stdout into this same
+    file, while `./start.command` only shows a terminal — so which place held the evidence
+    depended on how the user happened to launch it. The inode check stops the .app case
+    from writing every line twice.
     """
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    try:
+        if os.fstat(sys.stdout.fileno()).st_ino == LOG_PATH.stat().st_ino:
+            return                       # stdout already IS that file (the .app case)
+    except Exception:
+        pass
+    try:
+        with open(LOG_PATH, "a") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass                             # a log we cannot write is not worth breaking over
 
 
 class HudController(NSObject):

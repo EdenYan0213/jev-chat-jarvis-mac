@@ -295,9 +295,12 @@ uv run python src/judge_jev.py            # 判断层 TypeSafe 连通性
 每次分析都会往日志里写**分阶段耗时**，一眼能看出卡在哪一段。觉得慢就把这几行贴到 issue 里：
 
 ```bash
-tail -40 ~/Library/Logs/jev-jarvis.log     # 双击 .app 启动时的日志
-# 用 ./start.command 启动的话，直接看终端输出（同一个格式）
+tail -40 ~/Library/Logs/jev-jarvis.log   # 两种启动方式都写这里
+
+tail -f ~/Library/Logs/jev-jarvis.log    # 想实时盯就加 -f
 ```
+
+（`./start.command` 启动时终端里也会同步打印一份，格式相同。）
 
 ```
 [00:13:22] 读屏 抓取 251ms + OCR 557ms = 808ms · 读到 4 条（对方 4 条）
