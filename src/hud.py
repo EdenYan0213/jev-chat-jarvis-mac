@@ -4,8 +4,9 @@ Design notes
   * NSWindowStyleMaskNonactivatingPanel + floating level: the panel never steals focus
     from WeChat, and window-ID capture means it never appears in our own screenshots.
   * Poll loop: read the chat, hash the newest message, judge only when it changes.
-  * Judgment lands first (fast, ~0.5 s) and candidates fill in when the generator
-    finishes (~2 s), mirroring the phone demo's "生成中…" state.
+  * Judgment lands first (fast, ~0.5 s); candidates stream in line by line from ~0.6 s
+    (SSE, whoever's tone writes first paints first) and re-sort once the local ranking
+    pass lands.
   * The panel positions itself against WeChat's window each tick, so it follows moves,
     resizes and monitor changes without any window-server hooks.
   * Palette is WeChat's light theme (see PALETTE below); the Appearance is pinned to Aqua
@@ -189,6 +190,12 @@ class HudController(NSObject):
         self._title_h = 28              # measured right after the panel is built
         self.cand_texts: list[str | None] = [None] * (styles.MAX_SLOTS * styles.PER_TONE)
         self._last_intent = ""          # kept so a tone change can re-rank without re-judging
+        # Streaming candidates arrive one line at a time from request threads. The epoch
+        # (bumped on the main thread whenever a generation starts) is their staleness
+        # stamp: lines and ranked re-renders from a superseded run are dropped at the
+        # door instead of painting over the run that replaced them.
+        self._gen_epoch = 0
+        self._stream_n = [0] * styles.MAX_SLOTS   # lines already painted, per slot
 
         self._busy = False
         self._next_read_ts = 0.0    # reads before this timestamp are skipped (quiet screen)
@@ -526,6 +533,7 @@ class HudController(NSObject):
 
     @objc.python_method
     def _clear_candidates(self):
+        self._stream_n = [0] * styles.MAX_SLOTS
         for slot in range(styles.MAX_SLOTS):
             for row in range(styles.PER_TONE):
                 r = self._rows[slot][row]
@@ -640,6 +648,9 @@ class HudController(NSObject):
         if picked == self.slot_tones:
             return
         self.slot_tones = picked
+        # the previous generation's in-flight lines are stale from here on; bumping before
+        # the clear keeps a late arrival from repainting a row that was just wiped
+        self._gen_epoch += 1
         # the panel is sized by how many slots are in use, so re-lay-out *before* the new
         # candidates arrive: the empty rows appear at once and nothing jumps later
         self._clear_candidates()
@@ -664,7 +675,8 @@ class HudController(NSObject):
         self._render("status", f"换话术中…（{'、'.join(active)}）", PALETTE["muted"])
         self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
         threading.Thread(target=self._regen_work,
-                         args=(text, self._last_intent, list(self.slot_tones)),
+                         args=(text, self._last_intent, list(self.slot_tones),
+                               self._gen_epoch),
                          daemon=True).start()
 
     @objc.python_method
@@ -696,13 +708,22 @@ class HudController(NSObject):
         return payload, ""
 
     @objc.python_method
-    def _regen_work(self, text: str, intent: str, slot_tones: list[str]):
+    def _regen_work(self, text: str, intent: str, slot_tones: list[str], epoch: int):
         t0 = time.perf_counter()
+        first_ms: list[float | None] = [None]
+
+        def on_cand(slot, line_text):
+            if first_ms[0] is None:
+                first_ms[0] = (time.perf_counter() - t0) * 1000
+            self._push("applyCandidateLine:", (epoch, slot, line_text))
+
         try:
-            gen = self.generator.generate(text, intent, slot_tones)
+            gen = self.generator.generate(text, intent, slot_tones, on_candidate=on_cand)
             groups = gen.get("groups") or []
             failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+            first_note = f" · 首条 {first_ms[0]:.0f}ms" if first_ms[0] is not None else ""
             _log(f"换话术 生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms · {len(groups)} 个话术"
+                 f"{first_note}"
                  + (f" · 失败: {'; '.join(failed)}" if failed else ""))
             payload, err = self._grouped_payload(gen, text, intent)
             if payload is None:
@@ -710,16 +731,20 @@ class HudController(NSObject):
                 self._push("applyError:", f"候选生成失败: {err[:60]}")
                 return
             _log(f"换话术 端到端 {(time.perf_counter() - t0) * 1000:.0f}ms")
-            self._push("applyTones:", payload)
+            self._push("applyTones:", (epoch, payload))
         except Exception as e:
             _log(f"换话术失败 {type(e).__name__}: {str(e)[:60]}")
             self._push("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}")
 
     def applyTones_(self, payload):
+        epoch, groups = payload
+        if epoch != self._gen_epoch:
+            return                    # a run that a newer 话术 click has superseded
         self.rows["cand_header"].setStringValue_("候选回复（按合适度排序）")
-        total = sum(len(items) for _s, _t, items in payload)
+        total = sum(len(items) for _s, _t, items in groups)
         self._render("status", f"已换话术 · {total} 条", PALETTE["muted"])
-        self._render_groups(payload)
+        self._render_groups(groups)
+        self._stream_n = [0] * styles.MAX_SLOTS
 
     # ------------------------------------------------------------ controls
     def collapsePanel_(self, sender):
@@ -892,6 +917,7 @@ class HudController(NSObject):
             self.analyzed_text = newest.text
             self._prejudge_result = None      # spent: a verdict is shown exactly once
             self._analyzing = True
+            self._gen_epoch += 1   # stamps this run's streaming lines; older ones drop
             if pre_hit:
                 # Judgment already ran inside the settle window; go straight to the
                 # verdict on screen and start only the generation half.
@@ -984,8 +1010,17 @@ class HudController(NSObject):
         t0 = time.perf_counter()
         try:
             context = self._context_text(msgs, newest)
-            gen = self.generator.generate(newest.text, "", list(self.slot_tones), context)
-            self._finish_generate(gen, newest, t0, verdict)
+            epoch = self._gen_epoch
+            first_ms: list[float | None] = [None]
+
+            def on_cand(slot, line_text):
+                if first_ms[0] is None:
+                    first_ms[0] = (time.perf_counter() - t0) * 1000
+                self._push("applyCandidateLine:", (epoch, slot, line_text))
+
+            gen = self.generator.generate(newest.text, "", list(self.slot_tones),
+                                          context, on_candidate=on_cand)
+            self._finish_generate(gen, newest, t0, verdict, epoch, first_ms)
         except Exception as e:
             _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
             self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
@@ -1013,20 +1048,33 @@ class HudController(NSObject):
 
     @objc.python_method
     def _analyze(self, newest, msgs, prev_text: str = ""):
-        """Judge and generate in parallel, then rank. Judgment lands on screen first.
+        """Judge and generate in parallel; candidates stream in as they are written.
 
         Runs on its own thread (started by _work_inner): it takes over a second and must
-        not hold the read loop hostage.
+        not hold the read loop hostage. Each streamed line is painted as it arrives (no
+        score yet); once the slowest tone finishes, one local ranking pass re-sorts every
+        group and the panel re-renders in ranked order — the single re-sort the streamed
+        display waits for.
         """
         import concurrent.futures as cf
 
         t0 = time.perf_counter()
         context = self._context_text(msgs, newest)
+        epoch = self._gen_epoch
+        first_ms: list[float | None] = [None]
+
+        def gen_stream():
+            def on_cand(slot, line_text):
+                if first_ms[0] is None:
+                    first_ms[0] = (time.perf_counter() - t0) * 1000
+                self._push("applyCandidateLine:", (epoch, slot, line_text))
+            # generation does not need the intent, so it streams while judging; it does
+            # need the chosen 话术, which is read here (a plain list read) and passed in
+            return self.generator.generate(newest.text, "", list(self.slot_tones),
+                                           context, on_candidate=on_cand)
+
         with cf.ThreadPoolExecutor(max_workers=2) as ex:
-            # generation does not need the intent, so it runs while judging; it does need the
-            # chosen 话术, which is read here (a plain list read) and passed in
-            gen_future = ex.submit(self.generator.generate, newest.text, "",
-                                   list(self.slot_tones), context)
+            gen_future = ex.submit(gen_stream)
             verdict = None
             t_judge = time.perf_counter()
             try:
@@ -1052,20 +1100,24 @@ class HudController(NSObject):
                 _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
                 self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
                 return
-            self._finish_generate(gen, newest, t0, verdict)
+            self._finish_generate(gen, newest, t0, verdict, epoch, first_ms)
 
     @objc.python_method
-    def _finish_generate(self, gen: dict, newest, t0: float, verdict: dict | None):
+    def _finish_generate(self, gen: dict, newest, t0: float, verdict: dict | None,
+                         epoch: int, first_ms: list):
         """Log the generation, rank it against the intent, push the candidates.
 
         Shared by both analysis paths — the full one (judge ran here) and the pre-judged
         one (the verdict was computed during the settle window) — so the second half of
-        the pipeline has exactly one implementation.
+        the pipeline has exactly one implementation. `epoch`/`first_ms` come from the
+        streaming callbacks of whichever path ran, so the ranked re-render replaces
+        exactly the lines that were painted and the log can state the first-line cost.
         """
         groups = gen.get("groups") or []
         failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+        first_note = f" · 首条 {first_ms[0]:.0f}ms" if first_ms[0] is not None else ""
         _log(f"生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms · {len(groups)} 个话术并发"
-             f" → {sum(len(g['texts']) for g in groups)} 条候选"
+             f" → {sum(len(g['texts']) for g in groups)} 条候选{first_note}"
              + (f" · 失败: {'; '.join(failed)}" if failed else ""))
         intent = verdict["intent"] if verdict else ""
         t_rank = time.perf_counter()
@@ -1077,8 +1129,8 @@ class HudController(NSObject):
             return
         _log(f"排序 {rank_ms:.0f}ms（本地模型，一次前向）")
         _log(f"端到端 {(time.perf_counter() - t0) * 1000:.0f}ms"
-             f" · 从分析开始到候选上屏")
-        self._push("applyCandidates:", payload)
+             f" · 从分析开始到候选定稿")
+        self._push("applyCandidates:", (epoch, payload))
 
     @objc.python_method
     def _push(self, selector: str, payload=None):
@@ -1141,9 +1193,36 @@ class HudController(NSObject):
         self._render("actions", " · ".join(v.get("actions", [])), PALETTE["text"])
         self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
 
+    def applyCandidateLine_(self, payload):
+        """One streamed candidate: painted the moment its newline crossed the wire.
+
+        Rows fill in arrival order and carry no score yet — the ranking pass has not run.
+        The ranked re-render (applyCandidates: / applyTones:) replaces them wholesale a
+        moment later; until then the buttons already work, so nothing stops a user from
+        copying or filling the first line while the rest are still being written.
+        """
+        epoch, slot, text = payload
+        if epoch != self._gen_epoch or not self._slot_active(slot):
+            return                       # a run a newer message or 话术 click superseded
+        row = self._stream_n[slot]
+        if row >= styles.PER_TONE:
+            return                       # more lines than the panel has rows for
+        self._stream_n[slot] = row + 1
+        self._show()
+        r = self._rows[slot][row]
+        r["prob"].setStringValue_(f"#{row + 1}")
+        r["text"].setStringValue_(text)
+        for c in self._row_controls(slot, row):
+            c.setHidden_(False)
+        self.cand_texts[slot * styles.PER_TONE + row] = text
+
     def applyCandidates_(self, payload):
+        epoch, groups = payload
+        if epoch != self._gen_epoch:
+            return                       # a run a newer analysis has superseded
         self.rows["cand_header"].setStringValue_("候选回复（按合适度排序）")
-        self._render_groups(payload)
+        self._render_groups(groups)
+        self._stream_n = [0] * styles.MAX_SLOTS
 
     def applyError_(self, text):
         self._show()                       # never vanish without telling the user why

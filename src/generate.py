@@ -11,6 +11,9 @@ Two API shapes are supported, because providers disagree:
 speak the OpenAI shape; 智谱 and a few gateways offer both. The shape is inferred.
 one, otherwise it is inferred from the base URL (a path containing "anthropic" => anthropic).
 
+Both shapes stream: pass a per-line callback and the request goes out with stream=true,
+each candidate line handed over as soon as its newline is parsed out of the SSE body.
+
 Nothing is ever written back, and the key is never logged. Run
 `uv run python src/generate.py --check` to see which source is in use (key masked).
 
@@ -195,7 +198,9 @@ class Generator:
             self._creds = (base, key, self.model_override or model)
         return self._creds
 
-    def _call(self, prompt: str) -> str:
+    def _call(self, prompt: str, on_text=None) -> str:
+        """One completion. With `on_text`, stream (SSE) and feed each text delta to it;
+        the return value is the full text either way."""
         base, key, model, _src, api = load_credentials()
         # the constructor's overrides win — without this the `model` argument was accepted
         # and silently ignored, so the request went out with whatever the config named
@@ -213,6 +218,8 @@ class Generator:
                     "messages": [{"role": "user", "content": prompt}]}
             headers = {"content-type": "application/json", "x-api-key": key,
                        "anthropic-version": "2023-06-01"}
+            if on_text is not None:
+                return self._post_stream(url, headers, body, on_text, model, alt)
             data = self._post(url, headers, body)
             parts = data.get("content") or []
             raw = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
@@ -229,6 +236,8 @@ class Generator:
         body = {"model": model, "max_tokens": 300, "temperature": 0.9,
                 "messages": [{"role": "user", "content": prompt}]}
         headers = {"content-type": "application/json", "authorization": f"Bearer {key}"}
+        if on_text is not None:
+            return self._post_stream(url, headers, body, on_text, model, alt)
         data = self._post(url, headers, body)
         choices = data.get("choices") or []
         if not choices:
@@ -250,24 +259,108 @@ class Generator:
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             return json.load(r)
 
+    def _post_stream(self, url: str, headers: dict, body: dict, on_text,
+                     model: str, alt: str) -> str:
+        """POST with stream=true and walk the SSE body, feeding on_text every text delta.
+
+        Returns all deltas joined, so the caller runs the exact same line parsing the
+        non-streaming path does. The frame shapes differ by provider (OpenAI puts the
+        delta under choices[].delta.content, Anthropic under delta.text of a
+        content_block_delta event) — `_sse_text_delta` papers over that; "event:" lines,
+        keep-alives and the [DONE] sentinel are skipped here. The thinking-only diagnosis
+        crosses over too: reasoning deltas with no text at all raise ThinkingOnlyError
+        exactly like the non-streaming path.
+        """
+        self._last_url = url
+        req = urllib.request.Request(url, data=json.dumps(dict(body, stream=True)).encode(),
+                                     headers=headers)
+        parts: list[str] = []
+        saw_reasoning = False
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            for raw_line in r:            # line iteration: a utf-8 char never contains \n
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(payload)
+                except ValueError:
+                    continue              # a frame we cannot read is not worth dying over
+                delta = self._sse_text_delta(obj)
+                if delta:
+                    parts.append(delta)
+                    on_text(delta)
+                elif self._sse_reasoning_delta(obj):
+                    saw_reasoning = True
+        if not parts and saw_reasoning:
+            raise ThinkingOnlyError(THINKING_ONLY_HINT.format(model=model, alt=alt))
+        return "".join(parts)
+
     @staticmethod
-    def _parse(raw: str) -> list[str]:
+    def _sse_text_delta(obj: dict) -> str:
+        """The text one SSE frame carries, for either API shape ('' when it carries none)."""
+        if obj.get("type") == "content_block_delta":      # Anthropic shape
+            d = obj.get("delta") or {}
+            return (d.get("text") or "") if d.get("type") == "text_delta" else ""
+        for ch in obj.get("choices") or []:               # OpenAI shape
+            c = (ch.get("delta") or {}).get("content")
+            if c:
+                return c
+        return ""
+
+    @staticmethod
+    def _sse_reasoning_delta(obj: dict) -> str:
+        """The thinking one SSE frame carries — the streaming twin of the non-streaming
+        reasoning_content/reasoning/thinking checks in _call ('' when none)."""
+        if obj.get("type") == "content_block_delta":      # Anthropic shape
+            d = obj.get("delta") or {}
+            return (d.get("thinking") or "") if d.get("type") == "thinking_delta" else ""
+        for ch in obj.get("choices") or []:               # OpenAI shape
+            d = ch.get("delta") or {}
+            for field in ("reasoning_content", "reasoning"):
+                v = d.get(field)
+                if isinstance(v, str) and v:
+                    return v
+        return ""
+
+    @staticmethod
+    def _clean_line(s: str) -> str:
+        """One raw output line -> one candidate ('' to drop).
+
+        Shared by the batch parse and the streaming carve-up on purpose: both must agree
+        on what counts as a candidate, or the lines the panel streamed in and the list
+        the ranking runs over would not be the same lines.
+        """
+        s = s.strip()
+        if not s:
+            return ""
+        s = re.sub(r"^[\d]+[.、)．]\s*", "", s)   # "1." / "2、" numbering
+        s = _strip_quotes(s)
+        s = _strip_style_label(s)
+        s = _strip_quotes(s)                     # quotes the label removal exposed
+        return s.strip()
+
+    @classmethod
+    def _parse(cls, raw: str) -> list[str]:
         out = []
         for line in raw.splitlines():
-            s = line.strip()
-            if not s:
-                continue
-            s = re.sub(r"^[\d]+[.、)．]\s*", "", s)   # "1." / "2、" numbering
-            s = _strip_quotes(s)
-            s = _strip_style_label(s)
-            s = _strip_quotes(s)                     # quotes the label removal exposed
+            s = cls._clean_line(line)
             if s:
-                out.append(s.strip())
+                out.append(s)
         return out
 
     def _one_tone(self, message: str, intent: str, tone: str,
-                  context: str | None = None) -> tuple[list[str], str]:
-        """One request for one tone. Returns (texts, error); never raises."""
+                  context: str | None = None,
+                  on_line=None) -> tuple[list[str], str]:
+        """One request for one tone. Returns (texts, error); never raises.
+
+        With `on_line`, the request streams (SSE) and each candidate line is handed over
+        the moment its newline is parsed — the panel paints it then and there instead of
+        waiting for this tone to finish. The return value is the same full list either
+        way, and a stream that dies midway keeps the lines it already produced.
+        """
         # The recent turns go in with their speakers ("王总: …"), because a reply that fits
         # the last two sentences is usually not a reply to this one sentence in isolation.
         context_line = f"最近的对话：\n{context}\n\n" if context else ""
@@ -276,20 +369,39 @@ class Generator:
                                    intent_line=intent_line,
                                    n=styles.PER_TONE, tone=tone,
                                    instruction=styles.PRESETS[tone])
+        live: list[str] = []                 # lines handed to on_line so far
+        emit = on_line or (lambda _s: None)
+        buf = ""
+
+        def on_text(delta: str):
+            nonlocal buf
+            buf += delta
+            while "\n" in buf:               # carve out every line the delta completed
+                line, buf = buf.split("\n", 1)
+                s = self._clean_line(line)
+                if s:
+                    live.append(s)
+                    emit(s)
+
         try:
-            raw = self._call(prompt)
+            raw = self._call(prompt, on_text if on_line is not None else None)
         except ThinkingOnlyError as e:
-            return [], str(e)            # already panel-ready: model named, fix suggested
+            return live[:styles.PER_TONE], str(e)   # panel-ready: model named, fix suggested
         except urllib.error.HTTPError as e:
             detail = e.read()[:160].decode(errors="replace")
-            return [], f"HTTP {e.code} @ {self._last_url} — {detail}"
+            return live[:styles.PER_TONE], f"HTTP {e.code} @ {self._last_url} — {detail}"
         except Exception as e:
-            return [], f"{type(e).__name__}: {e}"
-        return self._parse(raw)[:styles.PER_TONE], ""
+            return live[:styles.PER_TONE], f"{type(e).__name__}: {e}"
+        texts = self._parse(raw)[:styles.PER_TONE]
+        for s in texts[len(live):]:          # the final line has no newline to announce it
+            live.append(s)
+            emit(s)
+        return texts, ""
 
     def generate(self, message: str, intent: str = "",
                  slot_tones: list[str] | None = None,
-                 context: str | None = None) -> dict:
+                 context: str | None = None,
+                 on_candidate=None) -> dict:
         """One concurrent request per selected 话术; returns the candidates grouped by tone.
 
         A tone gets its own request rather than one request listing every tone: asking a
@@ -299,6 +411,11 @@ class Generator:
 
         `slot_tones` is the panel's per-slot selection (styles.NONE_LABEL marks an unused
         slot). Two slots holding the same tone is allowed and simply runs it twice.
+
+        `on_candidate(slot, text)` switches the requests to streaming and is called —
+        from the request threads — as each candidate line is parsed out of the SSE body,
+        so the panel can paint lines before the slowest tone finishes. The returned dict
+        is identical either way; ranking still runs over the full result.
         """
         slots = list(slot_tones or (styles.DEFAULT_SLOTS + [styles.NONE_LABEL]))
         active = [(i, t) for i, t in enumerate(slots) if t in styles.PRESETS]
@@ -307,10 +424,14 @@ class Generator:
         if not self._creds_or_load()[1]:
             return {"groups": [], "error": MISSING_HINT, "elapsed_s": 0.0}
 
+        def bind(slot):              # bind the slot now; the lambda runs on request threads
+            return lambda text: on_candidate(slot, text)
+
         t0 = time.perf_counter()
         groups: list[dict] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as ex:
-            futures = {i: ex.submit(self._one_tone, message, intent, tone, context)
+            futures = {i: ex.submit(self._one_tone, message, intent, tone, context,
+                                    bind(i) if on_candidate else None)
                        for i, tone in active}
             for i, tone in active:          # read in slot order, not completion order
                 try:
