@@ -6,6 +6,12 @@ Mac 版 V0：**纯只读、零封号风险**——不注入、不 hook、不解�
 
 ![演示：微信群消息进来 → 面板给出意图、风险分级与三条候选回复 → 点「填入」直接进微信输入框](docs/demo.gif)
 
+## 交流反馈
+
+用着有问题、想提需求、或者想一起改，扫码进群（二维码 7 天失效，过期了在 issue 说一声）：
+
+<img src="docs/wechat-group.png" width="200" alt="扫码加入微信交流群">
+
 ## 现在能做什么
 
 - 抓取微信窗口并 OCR 聊天区（中文、左右分句、群聊发送者；微信不在前台也能抓）
@@ -193,12 +199,6 @@ tail -40 ~/Library/Logs/jev-jarvis.log   # 两种启动方式都写这里；不�
 不冻结 torch 而是做「启动器包」（首次启动用 uv 建 venv，实测 3 秒），避免 2–4 GB 的怪物；包跟着仓库 `.python-version` 走（3.12），有独立 TCC 身份，`LSUIElement` 不占 Dock。版本号只有一处：`pyproject.toml` 的 `version`。发版从干净 worktree 构建。有开发者证书可加 `--sign "Developer ID Application: ..."`。
 
 窗口原生红绿灯：🔴 关闭=退出、🟡 最小化=收起/展开、🟢 缩放=隐藏；菜单栏 J 图标：显示/收起、暂停读屏、立即重新分析、退出。
-
-## 交流反馈
-
-用着有问题、想提需求、或者想一起改，扫码进群（二维码 7 天失效，过期了在 issue 说一声）：
-
-<img src="docs/wechat-group.png" width="200" alt="扫码加入微信交流群">
 
 ## 许可与免责
 
