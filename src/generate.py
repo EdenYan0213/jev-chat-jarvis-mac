@@ -30,6 +30,7 @@ import urllib.request
 from pathlib import Path
 
 import userconfig
+import styles
 
 DEFAULT_MODEL = "glm-4-flash"
 # any Anthropic-compatible /v1/messages endpoint works; this one is a cheap, fast
@@ -40,22 +41,20 @@ DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com"
 MISSING_HINT = ("未配置生成层 Key：候选回复需要它，判断/风险不需要。"
                 "设置 OPENAI_API_KEY（或 ANTHROPIC_API_KEY）后重启，见 README 配置章节。")
 
-STYLES = ["稳妥型：先接住对方、表态清楚，必要时给一个时间点",
-          "轻松型：语气放松、带一点幽默感，适合关系不错的人",
-          "简短型：极简，一句话，不超过 12 个字"]
-
+# {n} appears twice on purpose: the style list and the "exactly n lines" demand have to agree,
+# or the model pads the answer with a line of its own.
 PROMPT = """刚收到一条微信消息，你要帮我回。
 
 消息：「{message}」
 {intent_line}
-请写 3 条风格不同的回复候选：
+请写 {n} 条风格不同的回复候选：
 {styles}
 
 硬性要求：
 - 每条不超过 30 个字，是直接能发出去的口吻，不要客套话、不要解释
 - 只说人话，像微信里打字的语气
-- 只输出 3 行，每行一条，不要编号、不要引号、不要任何前后缀
-- 不要写出风格名（不要写「稳妥型：」这种前缀），直接从回复内容开始"""
+- 只输出 {n} 行，每行一条，不要编号、不要引号、不要任何前后缀
+- 不要写出风格名（不要写「贴吧老哥 v1.0：」这类前缀），直接从回复内容开始"""
 
 
 # The model is told not to label its lines, and usually complies — but "usually" is exactly
@@ -74,7 +73,9 @@ _QUOTES = re.compile(r"""^["“”「『'‘]+|["”」』'’]+$""")
 
 
 def _strip_style_label(s: str) -> str:
-    return _STYLE_LABEL_SHORT.sub("", _STYLE_LABEL.sub("", s))
+    s = _STYLE_LABEL.sub("", s)
+    s = _STYLE_LABEL_SHORT.sub("", s)
+    return styles.strip_label(s)
 
 
 def _strip_quotes(s: str) -> str:
@@ -218,11 +219,20 @@ class Generator:
                 out.append(s.strip())
         return out
 
-    def generate(self, message: str, intent: str = "", n: int = 3) -> dict:
-        """intent is optional so the caller can start this in parallel with judging."""
+    def generate(self, message: str, intent: str = "",
+                 tones: list[str] | None = None) -> dict:
+        """intent is optional so the caller can start this in parallel with judging.
+
+        `tones` is the 话术 the user picked in the panel; one candidate comes back per tone,
+        so the number of candidates follows the selection rather than a fixed 3.
+        """
+        ids = styles.resolve(tones if tones is not None else styles.DEFAULT_SLOTS)
+        if not ids:
+            return {"candidates": [], "error": "没有选择任何话术", "elapsed_s": 0.0}
+        n = len(ids)
         intent_line = f"判断出的意图：{intent}\n" if intent else ""
-        prompt = PROMPT.format(message=message, intent_line=intent_line,
-                               styles="\n".join(f"{i + 1}. {s}" for i, s in enumerate(STYLES)))
+        prompt = PROMPT.format(message=message, intent_line=intent_line, n=n,
+                               styles=styles.prompt_block(ids))
         t0 = time.perf_counter()
         if not self._creds_or_load()[1]:
             return {"candidates": [], "error": MISSING_HINT, "elapsed_s": 0.0}

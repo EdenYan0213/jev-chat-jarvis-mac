@@ -37,6 +37,7 @@ from AppKit import (
     NSPanel,
     NSPasteboard,
     NSPasteboardTypeString,
+    NSPopUpButton,
     NSScreen,
     NSTextField,
     NSView,
@@ -58,6 +59,7 @@ userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inheri
 from perception import read_conversation, screen_capture_ok, request_screen_capture  # noqa: E402
 from judge import make_judge  # noqa: E402
 from generate import Generator, load_credentials  # noqa: E402
+import styles  # noqa: E402
 import fill  # noqa: E402
 
 PANEL_W, PANEL_H = 360, 614   # tall enough for 3-line candidates + the chat name row
@@ -65,7 +67,7 @@ COLLAPSED_H = 96              # height when the panel is rolled up
 POLL_INTERVAL = 1.0     # detection granularity
 SETTLE_S = 1.2          # wait this long with no new message before analysing (anti-flood)
 MIN_GAP_S = 2.0         # never restart analysis faster than this
-N_CANDIDATES = 3
+N_CANDIDATES = styles.MAX_SLOTS   # one candidate per 话术 slot, so these cannot drift apart
 
 # ---------------------------------------------------------------- palette
 # WeChat's light theme: a #F7F7F7 surface, near-black body text, #888888 for anything
@@ -107,6 +109,10 @@ CAND_TEXT_X = CAND_PROB_X + CAND_PROB_W + 8                    # 106
 CAND_TEXT_W = CAND_BTN_X - CAND_TEXT_X - 8                     # 128
 CAND_TEXT_H = 48                                                # up to 3 wrapped lines
 
+# 话术 pickers: one per candidate slot, three across the panel's usable width
+# (14 + 106 + 7 + 106 + 7 + 106 = 346 = PANEL_W - 14, the same right margin as everything else)
+TONE_POP_X, TONE_POP_W, TONE_POP_H, TONE_POP_GAP = 14, 106, 24, 7
+
 
 class HudController(NSObject):
     def init(self):
@@ -119,6 +125,11 @@ class HudController(NSObject):
         self.analyzed_text = None      # what the panel currently shows
         self.judge = make_judge()
         self.generator = Generator()
+        # 话术: which tones the candidate half writes in. Defaults to two (see styles.py);
+        # the third slot starts on 不用 so the panel opens with two candidates, not three.
+        self.tones = styles.resolve(styles.DEFAULT_SLOTS)
+        self._tone_pops: list = []
+        self._last_intent = ""          # kept so a tone change can re-rank without re-judging
         self.candidates: list[str] = []
         self._busy = False
         self._collapsed = False
@@ -188,6 +199,25 @@ class HudController(NSObject):
         view.addSubview_(header)
         self.rows["cand_header"] = header
         y -= 22
+
+        # ---- 话术 pickers: one per candidate slot, so up to 3 tones at once. The third
+        # slot starts on 不用, which is how the panel opens with two candidates by default.
+        tone_items = styles.labels() + [styles.NONE_LABEL]
+        tone_defaults = list(styles.DEFAULT_SLOTS) + [styles.NONE_LABEL]
+        for i in range(styles.MAX_SLOTS):
+            pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(TONE_POP_X + i * (TONE_POP_W + TONE_POP_GAP),
+                           y - TONE_POP_H, TONE_POP_W, TONE_POP_H), False)
+            pop.setFont_(NSFont.systemFontOfSize_(11))
+            pop.setControlSize_(AppKit.NSControlSizeSmall)
+            pop.addItemsWithTitles_(tone_items)
+            pop.selectItemWithTitle_(
+                tone_defaults[i] if i < len(tone_defaults) else styles.NONE_LABEL)
+            pop.setTarget_(self)
+            pop.setAction_("toneChanged:")
+            view.addSubview_(pop)
+            self._tone_pops.append(pop)
+        y -= TONE_POP_H + 8
 
         self.cand_rows = []
         for i in range(N_CANDIDATES):
@@ -414,8 +444,8 @@ class HudController(NSObject):
         if not 0 <= idx < len(self.candidates):
             return
         text = self.candidates[idx]
-        # Paste only reaches the frontmost app, so this clicks a moment later than the
-        # panel would like; paint the state before the blocking wait.
+        # The status line is painted before the call because writing into WeChat takes a
+        # beat; the click should look instant even though the write has not happened yet.
         self._render("status", "填入中…", PALETTE["muted"])
         self.panel.displayIfNeeded()
         if not fill.has_accessibility():
@@ -426,6 +456,54 @@ class HudController(NSObject):
             self._render("status", f"已填入候选 #{idx + 1}", PALETTE["green"])
         else:
             self._render("status", f"填入失败：{reason}", PALETTE["red"])
+
+    def toneChanged_(self, sender):
+        """A 话术 dropdown moved: the verdict is still valid, only the writing changes."""
+        picked = [p.titleOfSelectedItem() or styles.NONE_LABEL for p in self._tone_pops]
+        ids = styles.resolve(picked)      # drops 不用 and de-duplicates the three slots
+        if ids == self.tones:
+            return
+        self.tones = ids
+        self._regenerate()
+
+    @objc.python_method
+    def _regenerate(self):
+        """Re-run just the generation half for the message on screen.
+
+        No re-judging and no re-reading of the screen: the intent and risk do not depend on
+        the tone, and re-running them would make a dropdown click feel like a new analysis.
+        """
+        text = self.analyzed_text
+        if not text:
+            self._render("status", "话术已选 · 下条消息生效", PALETTE["muted"])
+            return
+        if not self.tones:
+            self._render("status", "没选话术 · 至少选一个", PALETTE["amber"])
+            return
+        self._render("status", f"换话术中…（{'、'.join(self.tones)}）", PALETTE["muted"])
+        self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
+        threading.Thread(target=self._regen_work,
+                         args=(text, self._last_intent, list(self.tones)),
+                         daemon=True).start()
+
+    @objc.python_method
+    def _regen_work(self, text: str, intent: str, tones: list[str]):
+        try:
+            gen = self.generator.generate(text, intent, tones)
+            texts = [c["text"] for c in gen.get("candidates", [])]
+            if not texts:
+                self._push("applyError:", f"候选生成失败: {gen.get('error', '空结果')[:60]}")
+                return
+            ranked = self.judge.rank_candidates(text, intent, texts) if intent else \
+                [{"text": t, "prob": 1.0 / len(texts)} for t in texts]
+            self._push("applyTones:", ranked)
+        except Exception as e:
+            self._push("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}")
+
+    def applyTones_(self, ranked):
+        self.rows["cand_header"].setStringValue_("候选回复（按合适度排序）")
+        self._render("status", f"已换话术 · {len(ranked)} 条", PALETTE["muted"])
+        self._render_candidates(ranked)
 
     # ------------------------------------------------------------ controls
     def collapsePanel_(self, sender):
@@ -552,8 +630,9 @@ class HudController(NSObject):
 
         context = "\n".join(m.text for m in msgs[:-1][-4:]) or None
         with cf.ThreadPoolExecutor(max_workers=2) as ex:
-            # generation does not need the intent, so it runs while judging
-            gen_future = ex.submit(self.generator.generate, newest.text, "")
+            # generation does not need the intent, so it runs while judging; it does need the
+            # chosen 话术, which is read here (a plain list read) and passed in
+            gen_future = ex.submit(self.generator.generate, newest.text, "", list(self.tones))
             verdict = None
             try:
                 verdict = self.judge.judge(newest.text, context=context)
@@ -610,6 +689,8 @@ class HudController(NSObject):
     def applyJudgment_(self, payload):
         v, sender, prev = payload
         self._show()
+        # kept so a 话术 change can re-rank the new candidates against the same verdict
+        self._last_intent = v.get("intent", "")
         self._render("message", v["message"], PALETTE["text"])
         self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
         backend = v.get("backend", "")
