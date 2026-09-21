@@ -13,6 +13,8 @@
 #   ./packaging/release.sh --sign "Developer ID Application: X (TEAM)"
 #                                              # 有开发者证书才用；--sign - 是 ad-hoc（不解决 Gatekeeper）
 #   ./packaging/release.sh --publish           # 建 GitHub Release 并上传（需要 gh 已登录）
+#   ./packaging/release.sh --publish --target <commit>
+#                                              # 把 release 钉在某个提交上（默认是默认分支最新提交）
 #
 # The build itself lives in build_app.sh — one build entry point, not two.
 set -euo pipefail
@@ -20,14 +22,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/dist"
 SIGN=""
+TARGET=""
 PUBLISH=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --out)     OUT="${2:-}";   [ -n "$OUT" ]   || { echo "--out 需要目录" >&2; exit 2; }; shift 2 ;;
-        --sign)    SIGN="${2:-}";  [ -n "$SIGN" ]  || { echo "--sign 需要证书名（ad-hoc 写 -）" >&2; exit 2; }; shift 2 ;;
+        --out)     OUT="${2:-}";     [ -n "$OUT" ]    || { echo "--out 需要目录" >&2; exit 2; }; shift 2 ;;
+        --sign)    SIGN="${2:-}";    [ -n "$SIGN" ]   || { echo "--sign 需要证书名（ad-hoc 写 -）" >&2; exit 2; }; shift 2 ;;
+        --target)  TARGET="${2:-}";  [ -n "$TARGET" ] || { echo "--target 需要提交/分支名" >&2; exit 2; }; shift 2 ;;
         --publish) PUBLISH=1; shift ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
         *) echo "未知参数：$1（--help 看用法）" >&2; exit 2 ;;
     esac
 done
@@ -112,8 +116,11 @@ if [ "$PUBLISH" = 1 ]; then
             git -C "$ROOT" log --pretty='- %s' | head -20
         fi
     } > "$NOTES"
-    gh release create "$TAG" "$ZIP" "$OUT/SHA256SUMS" \
-        --title "jev-jarvis $TAG" --notes-file "$NOTES"
+    RELEASE_ARGS=("$TAG" "$ZIP" "$OUT/SHA256SUMS" --title "jev-jarvis $TAG" --notes-file "$NOTES")
+    # pin the tag: without --target gh tags the default branch tip, which may have moved
+    # since the zip was built
+    [ -n "$TARGET" ] && RELEASE_ARGS+=(--target "$TARGET")
+    gh release create "${RELEASE_ARGS[@]}"
     echo "    已发布 $TAG"
 else
     echo
