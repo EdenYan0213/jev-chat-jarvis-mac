@@ -58,7 +58,10 @@ def run_decider() -> dict:
     repo = "Mapika/decider-2b"
     tok = AutoTokenizer.from_pretrained(repo)
     dev = "mps" if torch.backends.mps.is_available() else "cpu"
-    model = AutoModelForCausalLM.from_pretrained(repo, dtype=torch.bfloat16).to(dev).eval()
+    # must match src/judge.py — a regression test measuring a different dtype is measuring
+    # a configuration nobody ships
+    dtype = torch.float16 if dev == "mps" else torch.float32
+    model = AutoModelForCausalLM.from_pretrained(repo, dtype=dtype).to(dev).eval()
     letters = "ABCDEFGH"
     lids = [tok.encode(c, add_special_tokens=False)[0] for c in letters]
     temp = 1.3
@@ -72,7 +75,7 @@ def run_decider() -> dict:
         ids = tok(prompt, return_tensors="pt").to(dev)
         with torch.no_grad():
             logits = model(**ids).logits[0, -1]
-        probs = torch.softmax(logits[lids[: len(names)]].float() / temp, -1).numpy()
+        probs = torch.softmax(logits[lids[: len(names)]].float() / temp, -1).cpu().numpy()
         return names[int(np.argmax(probs))], float(probs.max()), probs
 
     t0 = time.perf_counter()
