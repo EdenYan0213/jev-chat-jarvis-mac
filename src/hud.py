@@ -1039,6 +1039,12 @@ def main() -> None:
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
     warn_if_no_generation_key()
     controller = HudController.alloc().init()
+    # First line of every run: which backends are actually in play. Support requests
+    # always need it, and it proves the log is live before the first message arrives.
+    _base, _key, _model, _src, _api = load_credentials()
+    _log(f"启动 · 判断层 "
+         f"{'TypeSafe Jev' if userconfig.get('TYPESAFE_API_KEY') else '本地 decider-2b'}"
+         f" · 生成层 {(_base + ' / ' + _model) if _key else '未配置（候选区会是空的）'}")
     controller._show()
     timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
         POLL_INTERVAL, controller, "tick:", None, True)
