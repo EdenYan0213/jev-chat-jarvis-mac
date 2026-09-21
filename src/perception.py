@@ -64,6 +64,10 @@ class Message:
     h: float = 0.0
     sender: str | None = None
     lines: list[str] = field(default_factory=list)
+    # normalized bounding box, kept spanning every folded line — the YOLO overlay draws
+    # one box per message, so a 3-line message must cover all 3 lines, not its first
+    x: float = 0.0
+    w: float = 0.0
 
 
 @dataclass
@@ -227,13 +231,21 @@ def ocr(path: Path, languages=("zh-Hans",), chat_only: bool = True) -> list[Text
     return _vision_blocks(handler, languages, chat_only)
 
 
-def capture_image(wid: int):
+def capture_image(wid: int, nominal: bool = True):
     """The window's pixels as a CGImage, without leaving the process. None when refused.
 
     Against `screencapture -l <wid>` writing a PNG, this is 4–29 ms versus 128–270 ms for the
     same window with identical recognition results (10 blocks, same text) — the difference
     being a subprocess spawn plus PNG encoding plus reading it back off disk. The capture
     runs every second, so when it works the saving is continuous.
+
+    nominal=True captures at 1x instead of the default retina 2x: Vision's cost scales
+    with pixel count, and chat text at 1x is still ~15 px tall — measured on rendered
+    Chinese lines, recognition is identical block-for-block while OCR time roughly halves.
+    The layout constants are all normalized, so nothing downstream notices the resolution.
+    If a macOS update ever refuses the flag and returns NULL, read_conversation() falls
+    back to the subprocess route and the log says so — degraded to the old behaviour,
+    never broken.
 
     It does NOT always work: the same call returns NULL once the display is asleep, while
     `screencapture` keeps producing images. So callers must treat None as "use the slow
@@ -242,9 +254,11 @@ def capture_image(wid: int):
     """
     import Quartz
     try:
+        opts = Quartz.kCGWindowImageBoundsIgnoreFraming
+        if nominal:
+            opts |= Quartz.kCGWindowImageNominalResolution
         return Quartz.CGWindowListCreateImage(
-            Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow, wid,
-            Quartz.kCGWindowImageBoundsIgnoreFraming)
+            Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow, wid, opts)
     except Exception:
         return None
 
@@ -379,9 +393,14 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
     if not chat:
         return []
 
-    # Vision y is bottom-origin; convert to top-origin so reading order is "biggest = topmost"
+    # Vision y is bottom-origin and bb.origin.y is the box's BOTTOM edge. Convert to a
+    # top-origin TOP edge (1 - y - h) so the stored y is literal: "distance from the
+    # pane's top to where this box starts". The old 1 - y stored the bottom edge's
+    # distance from the top — orderings and gap thresholds did not care (the transform
+    # is monotonic), but the YOLO overlay draws y as the top edge and every box sank by
+    # one box-height. Sorting and the fold/group logic below are unchanged either way.
     for b in chat:
-        b.y = 1.0 - b.y
+        b.y = 1.0 - b.y - b.h
     chat.sort(key=lambda b: b.y)
 
     # group blocks that sit on the same visual line
@@ -415,9 +434,15 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
             messages[-1].lines.append(b.text)
             messages[-1].text = "\n".join(messages[-1].lines)
             messages[-1].conf = min(messages[-1].conf, b.conf)
+            # grow the bounding box to cover the folded line (m.y stays the top line's)
+            m = messages[-1]
+            bottom = max(m.y + m.h, b.y + b.h)
+            m.x = min(m.x, b.x)
+            m.w = max(m.x + m.w, b.x + b.w) - m.x
+            m.h = bottom - m.y
         else:
             messages.append(Message(text=b.text, side=side, y=b.y, conf=b.conf,
-                                    h=b.h, lines=[b.text]))
+                                    h=b.h, lines=[b.text], x=b.x, w=b.w))
 
     # in group chats WeChat renders the sender name as a short line above the bubble.
     # A wider-than-usual gap after a short line is the tell; that line becomes the
