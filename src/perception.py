@@ -68,6 +68,7 @@ class Message:
     # one box per message, so a 3-line message must cover all 3 lines, not its first
     x: float = 0.0
     w: float = 0.0
+    last_y: float = 0.0     # top of the most recent folded line; fold bookkeeping only
 
 
 @dataclass
@@ -429,7 +430,11 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
     messages: list[Message] = []
     for b in per_line:
         side = "me" if b.x_center > midline else "them"
-        gap = (b.y - messages[-1].y) if messages else 1.0
+        # fold against the LAST folded line, not the message's first: comparing against
+        # the first line made every line from the third on measure ≥2 line-pitches away,
+        # so any 3+ line message was split into ≤2-line chunks — the judge then only ever
+        # saw the tail chunk, and the overlay drew a box per chunk
+        gap = (b.y - messages[-1].last_y) if messages else 1.0
         if messages and messages[-1].side == side and gap < 0.045:
             messages[-1].lines.append(b.text)
             messages[-1].text = "\n".join(messages[-1].lines)
@@ -440,9 +445,11 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
             m.x = min(m.x, b.x)
             m.w = max(m.x + m.w, b.x + b.w) - m.x
             m.h = bottom - m.y
+            m.last_y = b.y
         else:
             messages.append(Message(text=b.text, side=side, y=b.y, conf=b.conf,
-                                    h=b.h, lines=[b.text], x=b.x, w=b.w))
+                                    h=b.h, lines=[b.text], x=b.x, w=b.w,
+                                    last_y=b.y))
 
     # in group chats WeChat renders the sender name as a short line above the bubble.
     # A wider-than-usual gap after a short line is the tell; that line becomes the
