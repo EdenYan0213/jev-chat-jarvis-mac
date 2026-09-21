@@ -2,7 +2,4 @@ blank_issues_enabled: false
 contact_links:
   - name: 使用说明与已知限制
     url: https://github.com/jev-jarvis/jev-jarvis/blob/master/README.md
-    about: 用法、配置（两层 LLM 的 key 放哪）、面板怎么读、已知限制与下一步，提 issue 前建议先看这里
-  - name: 提「填入 / 权限」相关问题前
-    url: https://github.com/jev-jarvis/jev-jarvis/blob/master/README.md#用法
-    about: 屏幕录制与辅助功能两个权限的授权方式、以及「填入」不走剪贴板的说明，都在这节
+    about: 用法、配置（两层 LLM 的 key 放哪）、面板怎么读、已知限制，提 issue 前建议先看这里
