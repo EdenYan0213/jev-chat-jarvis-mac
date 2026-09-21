@@ -12,24 +12,40 @@
 #   * LSUIElement: a floating helper, no Dock icon, never steals focus
 #
 # Usage:  ./packaging/build_app.sh          -> builds ./jev-jarvis.app
+#         (to package the result for other people: ./packaging/release.sh)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/jev-jarvis.app"
 BUNDLE_ID="info.jevjarvis.app"
-VERSION="0.1.0"
+
+# the version has exactly one home: pyproject.toml
+VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' "$ROOT/pyproject.toml" | head -1)"
+if [ -z "$VERSION" ]; then
+    echo "读不到 pyproject.toml 里的 version" >&2
+    exit 1
+fi
+
+# Pin the interpreter to the repo's .python-version. The bundle installs its own venv,
+# and without a pin uv picks whatever it defaults to — that is how the .app ended up on
+# 3.13 while ./start.command ran 3.12, i.e. two "同一份代码" that were not the same runtime.
+PY_PIN="$(head -1 "$ROOT/.python-version" 2>/dev/null | tr -d '[:space:]')"
+[ -n "$PY_PIN" ] || PY_PIN="3.12"
 
 echo "==> 清理旧包"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app"
 
-echo "==> 拷贝 Python 源码"
+echo "==> 拷贝 Python 源码（版本 $VERSION / Python $PY_PIN）"
 cd "$ROOT"
 cp -R src "$APP/Contents/Resources/app/src"
-cp pyproject.toml uv.lock README.md "$APP/Contents/Resources/app/"
-[ -f .env.example ] && cp .env.example "$APP/Contents/Resources/app/"
+cp pyproject.toml uv.lock README.md .python-version "$APP/Contents/Resources/app/"
+# MIT requires the copyright notice to travel with a distributed copy
+if [ -f LICENSE ]; then cp LICENSE "$APP/Contents/Resources/app/"; fi
+if [ -f .env.example ]; then cp .env.example "$APP/Contents/Resources/app/"; fi
 # never ship local secrets or caches
 rm -rf "$APP/Contents/Resources/app/src/__pycache__"
+find "$APP/Contents/Resources/app" -name '.DS_Store' -delete
 
 echo "==> 写 Info.plist"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -104,9 +120,25 @@ export UV_PROJECT_ENVIRONMENT="$VENV"
 export USE_TF=0                  # laya/transformers: skip the TensorFlow probe
 export HF_HUB_DISABLE_TELEMETRY=1
 
-if [ ! -x "$VENV/bin/python" ]; then
-    log "首次启动：正在创建虚拟环境并安装依赖（需要几分钟，请保持联网）"
-    if ! uv sync --project "$RES/app" --quiet >>"$LOG" 2>&1; then
+# The venv must exist AND be the interpreter this bundle pins (@PYTHON_PIN@, written by
+# build_app.sh). uv keeps an existing environment as-is, so a venv built by a different
+# python would silently survive a rebuild — treat a mismatch like a missing venv.
+ready=0
+if [ -x "$VENV/bin/python" ]; then
+    found="$("$VENV/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo '?')"
+    if [ "$found" = "@PYTHON_PIN@" ]; then
+        ready=1
+    else
+        log "虚拟环境是 Python $found，本包需要 @PYTHON_PIN@ —— 重建"
+    fi
+fi
+
+if [ "$ready" = 0 ]; then
+    rm -rf "$VENV"
+    log "正在创建虚拟环境并安装依赖（需要几分钟，请保持联网）"
+    osascript -e 'display notification "正在准备运行环境（几分钟，需联网）" with title "jev-jarvis"' >/dev/null 2>&1
+    # --frozen: use the shipped uv.lock exactly, never re-resolve at runtime
+    if ! uv sync --frozen --python "@PYTHON_PIN@" --project "$RES/app" --quiet >>"$LOG" 2>&1; then
         die "依赖安装失败，请查看日志"
     fi
     log "依赖安装完成"
@@ -115,6 +147,14 @@ fi
 log "启动 hud.py"
 exec "$VENV/bin/python" "$RES/app/src/hud.py" >>"$LOG" 2>&1
 LAUNCHER
+
+# the pin is injected here rather than written into the heredoc: the heredoc is quoted
+# (so nothing else in the launcher gets expanded at build time), this keeps it that way
+sed -i '' "s/@PYTHON_PIN@/${PY_PIN}/g" "$APP/Contents/MacOS/jev-jarvis"
+if grep -q '@PYTHON_PIN@' "$APP/Contents/MacOS/jev-jarvis"; then
+    echo "启动器里的 Python 版本占位符没替换成功" >&2
+    exit 1
+fi
 chmod +x "$APP/Contents/MacOS/jev-jarvis"
 
 echo "==> 生成图标"
@@ -127,7 +167,34 @@ PY="$ROOT/.venv/bin/python"
   && echo "    图标已生成" \
   || echo "    跳过图标（生成失败，不影响使用）"
 
+echo "==> 校验"
+check() {  # fail the build instead of shipping a broken bundle silently
+    if ! eval "$2" >/dev/null 2>&1; then
+        echo "    ✗ $1" >&2
+        exit 1
+    fi
+    echo "    ✓ $1"
+}
+check "Info.plist 合法"            "plutil -lint '$APP/Contents/Info.plist'"
+check "启动器可执行"                "[ -x '$APP/Contents/MacOS/jev-jarvis' ]"
+check "源码进包（hud.py）"          "[ -f '$APP/Contents/Resources/app/src/hud.py' ]"
+check "锁文件进包（uv.lock）"        "[ -f '$APP/Contents/Resources/app/uv.lock' ]"
+check "Python 版本进包"             "[ -f '$APP/Contents/Resources/app/.python-version' ]"
+check "许可证进包（MIT）"           "[ -f '$APP/Contents/Resources/app/LICENSE' ]"
+check "依赖版本已冻结到 $PY_PIN"     "grep -q '${PY_PIN}' '$APP/Contents/MacOS/jev-jarvis'"
+check "没夹带缓存"                  "[ ! -d '$APP/Contents/Resources/app/src/__pycache__' ]"
+# a key that leaked into src/ would ship to whoever gets the bundle
+if grep -rEl --binary-files=without-match 'sk-[A-Za-z0-9]{20,}' \
+        "$APP/Contents/Resources/app/src" "$APP/Contents/Resources/app/.env.example" 2>/dev/null | grep -q .; then
+    echo "    ✗ 源码里疑似有 API key" >&2
+    exit 1
+fi
+echo "    ✓ 没夹带 API key"
+
 echo "==> 完成"
 du -sh "$APP" | awk '{print "    包体积: " $1}'
+echo "    版本: $VERSION（来自 pyproject.toml）"
+echo "    包内 Python: $PY_PIN（来自 .python-version）"
 echo "    路径: $APP"
 echo "    双击即可启动；首次启动会装依赖（几分钟）"
+echo "    要发给别人：./packaging/release.sh"
