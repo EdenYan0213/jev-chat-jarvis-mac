@@ -65,9 +65,14 @@ import fill  # noqa: E402
 
 PANEL_W, PANEL_H = 360, 614   # tall enough for 3-line candidates + the chat name row
 COLLAPSED_H = 96              # height when the panel is rolled up
-POLL_INTERVAL = 1.0     # detection granularity
-SETTLE_S = 1.2          # wait this long with no new message before analysing (anti-flood)
-MIN_GAP_S = 2.0         # never restart analysis faster than this
+# The tick timer fires at FAST_TICK; a read only runs when due. A quiet screen (fingerprint
+# match ⇒ no OCR) re-checks every FAST_TICK — a new message surfaces within 0.25 s instead
+# of within 1 s — while a moving screen (someone typing a burst) pays the full capture+OCR
+# per read and drops back to SLOW_TICK, the cadence the old fixed poll had.
+FAST_TICK = 0.25         # re-check cadence while the chat pane is quiet
+SLOW_TICK = 1.0          # re-check cadence while the chat pane is moving
+SETTLE_S = 1.2           # wait this long with no new message before analysing (anti-flood)
+MIN_GAP_S = 2.0          # never restart analysis faster than this
 CONTEXT_TURNS = 4       # how many recent turns both halves get to see
 
 
@@ -185,6 +190,10 @@ class HudController(NSObject):
         self._last_intent = ""          # kept so a tone change can re-rank without re-judging
 
         self._busy = False
+        self._next_read_ts = 0.0    # reads before this timestamp are skipped (quiet screen)
+        self._fingerprint = None    # last chat-pane fingerprint; equal ⇒ skip OCR entirely
+        self._last_full = None      # last OCR'd result, reused while the pane is unchanged
+        self._analyzing = False     # judge+generate runs off the tick path
         self._collapsed = False
         self._expanded_h = None       # full height, captured the first time we collapse
         self._paused = False
@@ -763,8 +772,8 @@ class HudController(NSObject):
 
     # --------------------------------------------------------------- loop
     def tick_(self, timer):
-        if self._busy or self._paused:
-            return  # paused, or a previous tick is still running
+        if self._paused or self._busy or time.time() < self._next_read_ts:
+            return  # paused, a previous read is still running, or not due yet
         self._busy = True
         threading.Thread(target=self._work, daemon=True).start()
 
@@ -782,21 +791,38 @@ class HudController(NSObject):
                 self._asked_permission = True
                 request_screen_capture()      # opens the system prompt
             self._push("applyError:", "需要屏幕录制权限 · 系统设置 › 隐私与安全性")
+            self._next_read_ts = time.time() + SLOW_TICK
             return
         try:
-            res = read_conversation(previous_wid=self._win_wid)
+            res = read_conversation(previous_wid=self._win_wid,
+                                    prev_fingerprint=self._fingerprint)
         except Exception as e:
             self._push("applyError:", f"读取失败: {type(e).__name__}: {str(e)[:40]}")
+            self._next_read_ts = time.time() + SLOW_TICK
             return
         if not res["ok"]:
             self._push("applyError:", f"{res['error']} · 微信没开或窗口被最小化？")
+            self._next_read_ts = time.time() + SLOW_TICK
             return
 
+        # Same fingerprint ⇒ same pixels ⇒ the messages are exactly what we last read.
+        # Cadence follows the screen: quiet checks back in FAST_TICK (capture+hash only,
+        # ~30 ms), moving screens just paid a full OCR and get SLOW_TICK like before.
+        self._fingerprint = res.get("fingerprint")
+        self._next_read_ts = time.time() + (FAST_TICK if res["unchanged"] else SLOW_TICK)
+
         # position immediately: analysis takes seconds, and a delayed correction
-        # showed up as a visible jump after the verdict landed
+        # showed up as a visible jump after the verdict landed. Pushed on unchanged
+        # frames too — the window can move while its pixels stay identical.
         self._win_wid = res["window"]["wid"]
-        self._push("applyChat:", res.get("chat_title") or "")
         self._push("applyPosition:", res["window"])
+        if res["unchanged"] and self._last_full is not None:
+            # the settle/analyze gate below still runs every read; an unchanged frame
+            # just skips re-deriving the messages it would act on
+            res = self._last_full
+        else:
+            self._last_full = res
+            self._push("applyChat:", res.get("chat_title") or "")
 
         msgs = res["messages"]
         if not msgs:
@@ -833,21 +859,38 @@ class HudController(NSObject):
 
         settled = (now - self.last_change_ts) >= SETTLE_S
         cooled = (now - self.last_analyze_ts) >= MIN_GAP_S
-        if newest.text != self.analyzed_text and settled and cooled:
+        if newest.text != self.analyzed_text and settled and cooled and not self._analyzing:
             self.last_analyze_ts = now
             self.analyzed_text = newest.text
             _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
             self._push("applyPending:", (newest.text, newest.sender, prev_text))
-            self._analyze(newest, msgs, prev_text)
+            # off the tick path on purpose: judge+generate+rank takes over a second, and
+            # while it runs the loop must keep reading — a message landing mid-analysis
+            # used to wait the whole analysis out before anyone even saw it
+            self._analyzing = True
+            threading.Thread(target=self._run_analysis,
+                             args=(newest, msgs, prev_text), daemon=True).start()
         elif newest.text != self.analyzed_text:
             # the wait is deliberate; say so once per arrival change so "it feels slow" can
             # be told apart from "it is still waiting out the burst window"
-            why = "消息还在变" if not settled else f"距上次分析不足 {MIN_GAP_S}s"
+            why = ("消息还在变" if not settled else
+                   "上一条还在分析" if self._analyzing else
+                   f"距上次分析不足 {MIN_GAP_S}s")
             if self._last_skip_reason != why:
                 self._last_skip_reason = why
                 _log(f"暂不分析（{why}）")
         else:
             self._last_skip_reason = None
+
+    @objc.python_method
+    def _run_analysis(self, newest, msgs, prev_text: str):
+        try:
+            self._analyze(newest, msgs, prev_text)
+        except Exception as e:
+            _log(f"分析失败 {type(e).__name__}: {str(e)[:60]}")
+            self._push("applyError:", f"分析失败: {type(e).__name__}: {str(e)[:40]}")
+        finally:
+            self._analyzing = False
 
     @objc.python_method
     def _context_text(self, msgs, newest) -> str | None:
@@ -870,7 +913,11 @@ class HudController(NSObject):
 
     @objc.python_method
     def _analyze(self, newest, msgs, prev_text: str = ""):
-        """Judge and generate in parallel, then rank. Judgment lands on screen first."""
+        """Judge and generate in parallel, then rank. Judgment lands on screen first.
+
+        Runs on its own thread (started by _work_inner): it takes over a second and must
+        not hold the read loop hostage.
+        """
         import concurrent.futures as cf
 
         t0 = time.perf_counter()
@@ -1052,7 +1099,7 @@ def main() -> None:
          f" · 生成层 {(_base + ' / ' + _model) if _key else '未配置（候选区会是空的）'}")
     controller._show()
     timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-        POLL_INTERVAL, controller, "tick:", None, True)
+        FAST_TICK, controller, "tick:", None, True)
     AppKit.NSRunLoop.currentRunLoop().addTimer_forMode_(timer, AppKit.NSDefaultRunLoopMode)
     app.run()
 
