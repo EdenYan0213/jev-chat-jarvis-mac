@@ -146,7 +146,6 @@ class HudController(NSObject):
         self._fixed: list = []          # (control, x, dy_from_top, w, h) — the rows above
         self._group_top = 0             # where the first group starts, from the top
         self._title_h = 28              # measured right after the panel is built
-        self._win_h = 0.0               # WeChat's window height, learned from applyPosition_
         self.cand_texts: list[str | None] = [None] * (styles.MAX_SLOTS * styles.PER_TONE)
         self._last_intent = ""          # kept so a tone change can re-rank without re-judging
 
@@ -290,29 +289,6 @@ class HudController(NSObject):
         return self.slot_tones[slot] in styles.PRESETS
 
     @objc.python_method
-    def _target_height(self) -> float:
-        """How tall the panel wants to be: WeChat's window height, capped to the screen.
-
-        Matching WeChat's height makes the panel and the window read as one unit instead of
-        a short box floating beside a tall one (the panel's top edge is aligned to WeChat's
-        either way, so equal heights also mean equal bottoms). The cap keeps a maximised
-        WeChat from pushing the panel off the bottom of the display.
-
-        Content is still laid out from the top, so what this adds is space *below* the
-        candidates — never a gap in the middle.
-        """
-        if self._win_h <= 0:
-            return 0.0
-        visible = 0.0
-        for screen in NSScreen.screens():
-            visible = max(visible, screen.visibleFrame().size.height)
-        # minus the title bar: this returns a CONTENT height, and it is the whole window
-        # (title bar included) that should be as tall as WeChat's — otherwise the panel's
-        # bottom edge hangs a title bar below WeChat's
-        target = min(self._win_h, visible - 24) if visible else self._win_h
-        return max(0.0, target - self._title_h)
-
-    @objc.python_method
     def _relayout(self):
         """Place every control for the current tone selection and size the panel to fit.
 
@@ -350,7 +326,7 @@ class HudController(NSObject):
             if slot < styles.MAX_SLOTS - 1:
                 dy += GROUP_GAP
 
-        content_h = max(dy + BOTTOM_PAD, self._target_height())
+        content_h = dy + BOTTOM_PAD
         view = self.panel.contentView()
         view.setFrameSize_(NSMakeSize(PANEL_W, content_h))
         for ctrl, x, top, w, h in placements + self._fixed:
@@ -910,10 +886,6 @@ class HudController(NSObject):
             self.panel.orderOut_(None)
 
     def applyPosition_(self, win):
-        # WeChat's window height decides how tall the panel is (see _target_height), so
-        # a resize of the chat window is a layout change, not just a reposition
-        self._win_h = float(win.get("h") or 0)
-        self._relayout()
         self._position_near(win)
 
 
