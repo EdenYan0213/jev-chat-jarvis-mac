@@ -34,6 +34,7 @@ import urllib.request
 
 from pathlib import Path
 
+import builtin
 import userconfig
 import styles
 
@@ -45,6 +46,8 @@ DEFAULT_OPENAI_BASE = "https://api.openai.com/v1"
 DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com"
 MISSING_HINT = ("未配置生成层 Key：候选回复需要它，判断/风险不需要。"
                 "设置 OPENAI_API_KEY（或 ANTHROPIC_API_KEY）后重启，见 README 配置章节。")
+# 用的是随包分发的凭据时报这个来源名，日志/--check 里能一眼分清「内置」和「你自己配的」
+BUILTIN_SOURCE = "内置默认"
 
 
 class _KeepAlivePool:
@@ -214,6 +217,37 @@ def pick_api_format(base: str, configured: str | None) -> str:
     return "anthropic" if "anthropic" in (base or "").lower() else "openai"
 
 
+_BUILTIN_MODEL: str | None = None
+
+
+def _resolve_builtin_model(base: str) -> str:
+    """Pick a model name the relay actually serves — asked once per process.
+
+    A distributed bundle freezes whatever name is compiled into it, so the day the relay
+    behind it gains or loses a channel every copy in the wild would start failing with
+    "no permission for this model". Asking the relay what it offers keeps those copies
+    working across channel swaps. Any failure falls back to builtin.MODEL: resolution is
+    an optimisation, never a precondition.
+    """
+    global _BUILTIN_MODEL
+    if _BUILTIN_MODEL is not None:
+        return _BUILTIN_MODEL
+    offered: list[str] = []
+    try:
+        req = urllib.request.Request(f"{base.rstrip('/')}/models",
+                                     headers={"authorization": f"Bearer {builtin.API_KEY}"})
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            offered = [m.get("id") for m in (json.load(resp).get("data") or []) if m.get("id")]
+    except Exception:
+        pass          # offline / not an OpenAI-shaped relay: fall through to the pinned name
+    for want in (builtin.MODEL, *builtin.MODEL_PREFERENCE):
+        if want in offered:
+            _BUILTIN_MODEL = want
+            return want
+    _BUILTIN_MODEL = offered[0] if offered else builtin.MODEL
+    return _BUILTIN_MODEL
+
+
 def load_credentials() -> tuple[str, str, str, str, str]:
     """Returns (base_url, api_key, model, source, api_format). Never raises.
 
@@ -234,9 +268,34 @@ def load_credentials() -> tuple[str, str, str, str, str]:
         base = anth["base"] or DEFAULT_ANTHROPIC_BASE
         return base, anth["key"], anth["model"] or DEFAULT_MODEL, anth["source"], pick_api_format(base, None)
 
+    # 两个都没配：回退到随包分发的内置凭据，让应用开箱就能出候选。位置在最后，
+    # 所以内置永远不会盖掉用户显式配的那一组。
+    if builtin.API_KEY:
+        return (builtin.BASE_URL, builtin.API_KEY, _resolve_builtin_model(builtin.BASE_URL),
+                BUILTIN_SOURCE, pick_api_format(builtin.BASE_URL, None))
+
     base = oai["base"] or anth["base"] or DEFAULT_OPENAI_BASE
     model = oai["model"] or anth["model"] or DEFAULT_MODEL
     return base, "", model, "none", pick_api_format(base, None)
+
+
+def _extra_params() -> dict:
+    """Extra request-body fields from OPENAI_EXTRA_BODY (a JSON object).
+
+    Some endpoints need a switch the OpenAI shape has no field for: an unswitched Qwen3
+    spends its whole reply budget reasoning (85s per call vs 2s on the same relay). Field
+    names are provider-specific, so this passes through whatever is configured rather than
+    naming one option. Malformed JSON is ignored — this runs on every generation, and a
+    typo in an optional knob must not be able to take the candidates down.
+    """
+    raw = userconfig.get("OPENAI_EXTRA_BODY") or builtin.EXTRA_BODY
+    if not raw:
+        return {}
+    try:
+        extra = json.loads(raw)
+    except ValueError:
+        return {}
+    return extra if isinstance(extra, dict) else {}
 
 
 def credential_status() -> str:
@@ -315,6 +374,7 @@ class Generator:
         url = _endpoint(base, "openai")
         body = {"model": model, "max_tokens": 300, "temperature": 0.9,
                 "messages": [{"role": "user", "content": prompt}]}
+        body.update(_extra_params())
         headers = {"content-type": "application/json", "authorization": f"Bearer {key}"}
         if on_delta is not None:
             return self._stream_openai(url, headers, body, model, alt, on_delta)

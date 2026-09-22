@@ -69,7 +69,7 @@ userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inheri
 from perception import (  # noqa: E402
     read_conversation, screen_capture_ok, request_screen_capture, warm_ocr)
 from judge import make_judge  # noqa: E402
-from generate import Generator, load_credentials  # noqa: E402
+from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
 
@@ -1566,8 +1566,9 @@ def warn_if_no_generation_key() -> None:
 
     OPENAI_* and ANTHROPIC_* are two ways to configure the same generation layer, so this
     fires only when NEITHER is set: either one on its own is a complete configuration.
-    TypeSafe is not checked — it has a local fallback, so it is never missing, only
-    different.
+    A packaged build also carries a shared default (src/builtin.py), so this dialog only
+    appears when that default was deliberately emptied out. TypeSafe is not checked — it
+    has a local fallback, so it is never missing, only different.
 
     Drawn with osascript rather than NSAlert, which was measured to not work here: an
     accessory app cannot activate itself (NSApp.isActive stays False after
@@ -1605,6 +1606,7 @@ def main() -> None:
     _log(f"启动 · 判断层 "
          f"{'TypeSafe Jev' if userconfig.get('TYPESAFE_API_KEY') else '本地 decider-2b'}"
          f" · 生成层 {(_base + ' / ' + _model) if _key else '未配置（候选区会是空的）'}"
+         + ("（内置默认）" if _src == BUILTIN_SOURCE else "")
          + (" · YOLO 框开" if controller._show_boxes else ""))
     controller._show()
     # Warm the heavy one-off loads (Vision OCR, judge model) while the panel is idle, so
