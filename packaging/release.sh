@@ -78,6 +78,10 @@ echo "==> 压缩"
 # --keepParent: the zip must contain jev-jarvis.app/ itself, so unzipping gives an app
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 ( cd "$OUT" && shasum -a 256 "$(basename "$ZIP")" > SHA256SUMS )
+# fixed asset name so releases/latest/download/<name> is a permanent link (brew taps,
+# installers, docs): uploaded alongside the versioned zip on every release (#31)
+STABLE="$OUT/jev-chat-jarvis-macos.zip"
+cp "$ZIP" "$STABLE"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -128,15 +132,37 @@ if [ "$PUBLISH" = 1 ]; then
             git -C "$ROOT" log --pretty='- %s' | head -20
         fi
     } > "$NOTES"
-    RELEASE_ARGS=("$TAG" "$ZIP" "$OUT/SHA256SUMS" --title "jev-jarvis $TAG" --notes-file "$NOTES")
+    RELEASE_ARGS=("$TAG" "$ZIP" "$STABLE" "$OUT/SHA256SUMS" --title "jev-jarvis $TAG" --notes-file "$NOTES" --latest)
     # pin the tag: without --target gh tags the default branch tip, which may have moved
     # since the zip was built
     [ -n "$TARGET" ] && RELEASE_ARGS+=(--target "$TARGET")
     gh release create "${RELEASE_ARGS[@]}"
-    echo "    已发布 $TAG"
+    echo "    已发布 $TAG（含稳定名资产 jev-chat-jarvis-macos.zip）"
+
+    # post-publish self-check (#31): never trust the default "Latest" pointer — a late
+    # hotfix of an old version would silently re-point every latest/ download URL
+    echo "==> 发布自检（Latest 指针 + 稳定链接）"
+    latest=""
+    for _ in 1 2 3; do
+        sleep 5
+        latest="$(gh api repos/:owner/:repo/releases/latest --jq .tag_name 2>/dev/null || true)"
+        [ "$latest" = "$TAG" ] && break
+    done
+    if [ "$latest" != "$TAG" ]; then
+        echo "    ✗ Latest 指针指向 ${latest:-<无>} 而非 $TAG，手动修正：gh release edit $TAG --latest" >&2
+        exit 1
+    fi
+    echo "    ✓ Latest 指针 = $TAG"
+    slug="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+    code="$(curl -sIL -o /dev/null -w '%{http_code}' "https://github.com/$slug/releases/latest/download/jev-chat-jarvis-macos.zip" || true)"
+    if [ "$code" != "200" ]; then
+        echo "    ✗ 稳定链接不可用（HTTP $code），检查资产 jev-chat-jarvis-macos.zip 是否上传成功" >&2
+        exit 1
+    fi
+    echo "    ✓ 稳定链接可下载（releases/latest/download/jev-chat-jarvis-macos.zip）"
 else
     echo
     echo "    下一步（发 GitHub Release）："
-    echo "      gh release create v$VERSION \"$ZIP\" \"$OUT/SHA256SUMS\" --title \"jev-jarvis v$VERSION\" --generate-notes"
+    echo "      gh release create v$VERSION \"$ZIP\" \"$STABLE\" \"$OUT/SHA256SUMS\" --title \"jev-jarvis v$VERSION\" --generate-notes --latest"
     echo "    或直接重跑：./packaging/release.sh --publish"
 fi
