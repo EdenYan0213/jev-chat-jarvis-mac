@@ -1,0 +1,35 @@
+# CI：PR 与 master push 自动跑离线回归（合成 OCR，不读屏、不调 API、不读凭据）。
+# 测试导入 Quartz（pyobjc），必须 macOS runner；本仓库公开，macOS runner 免费不计费。
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+# 同一分支的新 run 取消同 ref 的旧 run，省排队时间
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: 离线回归 (unittest)
+    runs-on: macos-latest
+    # 本地实测全套 <2s，超时给的是冷缓存装依赖（torch 较大）的余量
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # 注：setup-uv 自 v8 起不再发布 @v8 这类 major tag，须 pin 完整版本号
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+
+      - name: 离线回归
+        run: uv run python -B -m unittest discover -s tests
