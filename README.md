@@ -8,9 +8,14 @@
 
 ## 交流反馈
 
-用着有问题、想提需求、想一起改，扫码进群（二维码 7 天失效，过期了在 issue 说一声）：
+用着有问题、想提需求、想一起改，扫码进群；**群快满了**，进不去就直接加个人微信（备注来意）。群二维码 7 天失效，过期了在 issue 说一声：
 
-<img src="docs/wechat-group.png" width="200" alt="扫码加入微信交流群">
+<table>
+  <tr>
+    <td align="center"><img src="docs/wechat-group.png" width="200" alt="扫码加入微信交流群"><br><sub>交流群</sub></td>
+    <td align="center"><img src="docs/wechat-personal.png" width="200" alt="扫码加个人微信"><br><sub>个人微信</sub></td>
+  </tr>
+</table>
 
 ## 它能做什么
 
