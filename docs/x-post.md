@@ -80,7 +80,7 @@
 ### 7/7（177/280）
 
 ```
-https://github.com/jev-jarvis/jev-jarvis （MIT）
+https://github.com/jev-chat/jev-chat-jarvis-mac （MIT）
 
 判断层不用 key，本地小模型就够；只有写候选那层要配一个任意兼容端点的 key。
 

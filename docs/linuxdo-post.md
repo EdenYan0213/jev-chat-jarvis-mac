@@ -124,12 +124,12 @@ decider-2b 的分布是平滑的，**最高档概率从不超过 0.4**（实测 
 
 ## 跑起来
 
-**不想自己构建**：[Releases](https://github.com/jev-jarvis/jev-jarvis/releases/latest) 里有打好的 `.app`（约 400 KB）—— 下载、解压、拖进「应用程序」就行。第一次打开要**右键 → 打开**（没做 Apple 公证，直接双击会被 Gatekeeper 拦，只需这一次）。
+**不想自己构建**：[Releases](https://github.com/jev-chat/jev-chat-jarvis-mac/releases/latest) 里有打好的 `.app`（约 400 KB）—— 下载、解压、拖进「应用程序」就行。第一次打开要**右键 → 打开**（没做 Apple 公证，直接双击会被 Gatekeeper 拦，只需这一次）。
 
 想自己跑源码：
 
 ```bash
-git clone https://github.com/jev-jarvis/jev-jarvis.git
+git clone https://github.com/jev-chat/jev-chat-jarvis-mac.git
 cd jev-jarvis
 ./start.command          # 会自动用 uv 建环境（没装 uv 也会自己装）
 ```
@@ -166,7 +166,7 @@ chmod 600 ~/.config/jev-jarvis/env
 
 ## 地址
 
-**https://github.com/jev-jarvis/jev-jarvis**（MIT）
+**https://github.com/jev-chat/jev-chat-jarvis-mac**（MIT）
 
 交流群（微信扫码，二维码 **7 天过期**，过期了在这里说一声我换）：
 
