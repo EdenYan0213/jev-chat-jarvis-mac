@@ -93,6 +93,8 @@ STABLE_READS = 3         # … but only after this many consecutive unchanged re
 MIN_GAP_S = 2.0          # never restart analysis faster than this
 CONTEXT_TURNS = 4        # recent turns the generation half sees
 JUDGE_TURNS = 2          # recent turns the judge half sees: shorter prompt, faster forward
+IDLE_STATUS = "等待微信消息…"       # the resting status line (also set at build time)
+WARM_STATUS = "判断模型加载中…（首次需下载，可能数分钟）"  # shown while judge warm-up runs
 
 
 # Shared with the settings window so both surfaces keep one visual vocabulary.
@@ -452,7 +454,7 @@ class HudController(NSObject):
         self.panel.setContentView_(view)
         self._title_h = self.panel.frame().size.height - PANEL_H   # measured, not assumed
         self._relayout()
-        self.rows["status"].setStringValue_("等待微信消息…")
+        self.rows["status"].setStringValue_(IDLE_STATUS)
         self._wire_window_controls()
         self._install_status_item()
 
@@ -1742,6 +1744,28 @@ class HudController(NSObject):
         self._show()                       # never vanish without telling the user why
         self._render("status", text, PALETTE["red"])
 
+    def applyStatus_(self, text):
+        """A neutral status line pushed from a worker thread (e.g. the warm-up)."""
+        self._render("status", text, PALETTE["muted"])
+
+    def applyWarmFailed_(self, text):
+        """Warm-up failure: same as applyError_ but outside the reply-epoch guard.
+
+        The warm-up is not a reply run — a message that starts analysing while it
+        fails must not be able to swallow this line like it swallows late results.
+        """
+        self._show()                       # never vanish without telling the user why
+        self._render("status", text, PALETTE["red"])
+
+    def applyWarmDone_(self, _payload):
+        """Clear the warm-up line, but only if nothing more urgent replaced it.
+
+        The first load can run for minutes; a message that arrived and got analysed in
+        that window owns the status line now, and this must not steal it back.
+        """
+        if self.rows["status"].stringValue() == WARM_STATUS:
+            self._render("status", IDLE_STATUS, PALETTE["muted"])
+
     def applyHidden_(self, reason):
         # WeChat gone or unreadable -> take the panel away (the app "opens with WeChat")
         self._render("status", reason, PALETTE["muted"])
@@ -1843,13 +1867,25 @@ class HudController(NSObject):
         else:
             _log("预热 OCR 失败 · 首次读屏会稍慢，不影响使用")
 
+        # #37: the first decider-2b load can take minutes (download included) or die to
+        # memory pressure — both used to look identical from outside: a silent panel.
+        # The "loading" line says what the wait is; applyWarmDone_ clears it only if
+        # nothing more urgent has replaced it in the meantime.
+        local_judge = not userconfig.get("TYPESAFE_API_KEY")
+        if local_judge:
+            self._push("applyStatus:", WARM_STATUS)
         try:
             self.judge.warm()
         except Exception as e:
             _log(f"预热判断模型失败 {type(e).__name__}: {str(e)[:60]}")
+            if local_judge:
+                self._push("applyWarmFailed:",
+                           "判断模型加载失败 · 可配置 TYPESAFE_API_KEY 走云端判断")
         else:
             self._judged_once = True  # same: the load is paid, the first judge is steady-state
             _log(f"预热 判断模型就绪 · 总耗时 {(time.perf_counter() - t0) * 1000:.0f}ms")
+            if local_judge:
+                self._push("applyWarmDone:", None)
 
 
 def warn_if_no_generation_key() -> None:
