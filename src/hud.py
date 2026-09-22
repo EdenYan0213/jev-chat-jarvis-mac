@@ -59,7 +59,8 @@ from AppKit import (
     NSWindowZoomButton,
     NSWindowCloseButton,
 )
-from Foundation import NSMakeRect, NSMakeSize, NSObject, NSTimer
+from Foundation import (NSMutableAttributedString, NSMakeRange, NSMakeRect,
+                        NSMakeSize, NSObject, NSTimer)
 
 sys.path.insert(0, str(Path(__file__).parent))
 import userconfig  # noqa: E402
@@ -72,6 +73,7 @@ from judge import make_judge  # noqa: E402
 from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
+import ui_style  # noqa: E402
 
 PANEL_W, PANEL_H = 360, 614   # tall enough for 3-line candidates + the chat name row
 COLLAPSED_H = 96              # height when the panel is rolled up
@@ -93,33 +95,9 @@ CONTEXT_TURNS = 4        # recent turns the generation half sees
 JUDGE_TURNS = 2          # recent turns the judge half sees: shorter prompt, faster forward
 
 
-# ---------------------------------------------------------------- palette
-# Native light vibrancy with cool ink, quiet metadata and semantic risk colours. Alpha is
-# intentional: NSVisualEffectView supplies the material, these tints only establish depth.
-
-
-def _rgb(hex_code: int, alpha: float = 1.0) -> NSColor:
-    return NSColor.colorWithCalibratedRed_green_blue_alpha_(
-        ((hex_code >> 16) & 0xFF) / 255.0,
-        ((hex_code >> 8) & 0xFF) / 255.0,
-        (hex_code & 0xFF) / 255.0,
-        alpha,
-    )
-
-
-PALETTE = {
-    "bg": _rgb(0xF5F9F8, 0.74),
-    "text": _rgb(0x142038),   # judged message, intent, candidates, action advice
-    "muted": _rgb(0x7C879C),  # status, sender/context, confidence, percentages, headers
-    "green": _rgb(0x07C160),  # WeChat brand green — risk 安全, success feedback
-    "amber": _rgb(0xD99212),  # risk 留神
-    "red": _rgb(0xE95353),    # risk 危险, failures
-    "surface": _rgb(0xFFFFFF, 0.36),
-    "row": _rgb(0xFFFFFF, 0.24),
-    "field": _rgb(0xFFFFFF, 0.42),
-    "edge": _rgb(0xFFFFFF, 0.72),
-    "track": _rgb(0xB8C1C6, 0.42),
-}
+# Shared with the settings window so both surfaces keep one visual vocabulary.
+PALETTE = ui_style.PALETTE
+_rgb = ui_style.rgb
 
 # Compact reply rows: probability rail, fully wrapped reply, then the two existing actions.
 # Only the minimum is fixed. _relayout() measures each candidate and grows the row as needed.
@@ -318,11 +296,16 @@ class HudController(NSObject):
 
         # The latest master adds model settings to this same header. Keep it as a quiet,
         # standalone icon so the new control does not collide with the chat title.
-        self.settings_button = self._make_button(PANEL_W - 38, 0, 24, 24,
+        self.settings_button = self._make_button(PANEL_W - 44, 0, 32, 32,
                                                  "", "openSettings:", 0)
-        self.settings_button.setImage_(AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            "gearshape", "模型设置"))
+        settings_icon = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "gearshape", "模型设置")
+        symbol_config = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(
+            12, AppKit.NSFontWeightRegular)
+        settings_icon = settings_icon.imageWithSymbolConfiguration_(symbol_config)
+        self.settings_button.setImage_(settings_icon)
         self.settings_button.setImagePosition_(AppKit.NSImageOnly)
+        self.settings_button.setImageScaling_(AppKit.NSImageScaleNone)
         self.settings_button.setBordered_(False)
         self.settings_button.setContentTintColor_(PALETTE["muted"])
         self.settings_button.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
@@ -331,7 +314,7 @@ class HudController(NSObject):
         self.settings_button.setAccessibilityLabel_("模型设置")
         self.settings_button.setHidden_(False)
         view.addSubview_(self.settings_button)
-        self._fixed.append((self.settings_button, PANEL_W - 38, 10, 24, 24))
+        self._fixed.append((self.settings_button, PANEL_W - 44, 4, 32, 32))
 
         # Decorative surfaces are fixed; every string still comes from the existing rows.
         for surface, x, top, w, h in (
@@ -365,19 +348,21 @@ class HudController(NSObject):
         self._detail_views.append(risk_title)
         for i, (title, color) in enumerate((
             ("低", PALETTE["green"]), ("中", PALETTE["amber"]), ("高", PALETTE["red"]))):
-            dot = self._make_surface(4, color.colorWithAlphaComponent_(0.28))
+            center_x = 278 + i * 26
+            dot = self._make_surface(4, color.colorWithAlphaComponent_(0.68))
             view.addSubview_(dot)
-            self._fixed.append((dot, 272 + i * 24, 160, 8, 8))
+            self._fixed.append((dot, center_x - 4, 152, 8, 8))
             self._detail_views.append(dot)
             self._risk_dots.append(dot)
-            label = self._make_label(0, 0, 12, 12, size=9, color=PALETTE["muted"])
+            label = self._make_label(0, 0, 20, 14, size=9, color=PALETTE["muted"])
+            label.setAlignment_(AppKit.NSTextAlignmentCenter)
             label.setStringValue_(title)
             view.addSubview_(label)
-            self._fixed.append((label, 282 + i * 24, 158, 12, 12))
+            self._fixed.append((label, center_x - 10, 164, 20, 14))
             self._detail_views.append(label)
 
         for key, x, top, w, h, size, color, bold in (
-            ("chat", 20, 14, PANEL_W - 76, 20, 15, PALETTE["green"], True),
+            ("chat", 20, 14, PANEL_W - 76, 20, 15, PALETTE["accent"], True),
             ("status", 20, 36, PANEL_W - 40, 14, 10, PALETTE["muted"], False),
             ("message", 26, 62, PANEL_W - 52, 30, 14, PALETTE["text"], False),
             ("sender", 26, 96, PANEL_W - 52, 14, 10, PALETTE["muted"], False),
@@ -396,10 +381,10 @@ class HudController(NSObject):
                 self._detail_views.append(tf)
 
         header = self._make_label(18, 0, PANEL_W - 36, 18,
-                                  size=12, color=PALETTE["muted"], bold=True)
-        header.setStringValue_("候选回复（按合适度排序）")
+                                  size=12, color=PALETTE["text"], bold=True)
         view.addSubview_(header)
         self.rows["cand_header"] = header
+        self._set_candidate_header("候选回复（按合适度排序）")
         self._fixed.append((header, 18, 250, PANEL_W - 36, 18))
         self._detail_views.append(header)
         self._group_top = 274
@@ -640,41 +625,18 @@ class HudController(NSObject):
     @objc.python_method
     def _make_surface(self, radius: float, color: NSColor,
                       border: NSColor | None = None) -> NSView:
-        """Layer-backed visual surface; it never owns or transforms application data."""
-        surface = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 1, 1))
-        surface.setWantsLayer_(True)
-        surface.layer().setBackgroundColor_(color.CGColor())
-        surface.layer().setCornerRadius_(radius)
-        if border is not None:
-            surface.layer().setBorderColor_(border.CGColor())
-            surface.layer().setBorderWidth_(0.75)
-        return surface
+        return ui_style.make_surface(radius, color, border)
 
     @objc.python_method
     def _make_label(self, x, y, w, h, size=13, color=None, bold=False):
-        tf = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
-        tf.setStringValue_("")
-        tf.setBezeled_(False)
-        tf.setDrawsBackground_(False)
-        tf.setEditable_(False)
-        tf.setSelectable_(True)
-        tf.setTextColor_(PALETTE["text"] if color is None else color)
-        tf.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
-        return tf
+        return ui_style.make_label("", x, y, w, h, size, color, bold, selectable=True)
 
     @objc.python_method
     def _make_button(self, x, y, w, h, title, action, tag):
         """Compact native action with a light outline over the vibrancy material."""
         btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
         btn.setTitle_(title)
-        btn.setBordered_(False)
-        btn.setFont_(NSFont.systemFontOfSize_(10))
-        btn.setContentTintColor_(PALETTE["text"])
-        btn.setWantsLayer_(True)
-        btn.layer().setBackgroundColor_(PALETTE["row"].CGColor())
-        btn.layer().setBorderColor_(PALETTE["edge"].CGColor())
-        btn.layer().setBorderWidth_(0.75)
-        btn.layer().setCornerRadius_(CAND_BTN_H / 2)
+        ui_style.style_button(btn, font_size=10, radius=CAND_BTN_H / 2)
         btn.setTarget_(self)
         btn.setAction_(action)
         btn.setTag_(tag)
@@ -701,6 +663,38 @@ class HudController(NSObject):
         tf.setStringValue_(text)
         if color is not None:
             tf.setTextColor_(color)
+
+    @objc.python_method
+    def _set_candidate_header(self, text: str):
+        """Keep the section title strong while treating its live status as metadata."""
+        value = NSMutableAttributedString.alloc().initWithString_(text)
+        value.addAttributes_range_({
+            NSFontAttributeName: NSFont.systemFontOfSize_(12),
+            NSForegroundColorAttributeName: PALETTE["muted"],
+        }, NSMakeRange(0, len(text)))
+        title_len = min(len("候选回复"), len(text))
+        value.addAttributes_range_({
+            NSFontAttributeName: NSFont.boldSystemFontOfSize_(12),
+            NSForegroundColorAttributeName: PALETTE["text"],
+        }, NSMakeRange(0, title_len))
+        self.rows["cand_header"].setAttributedStringValue_(value)
+
+    @objc.python_method
+    def _set_probability_label(self, field: NSTextField, row: int, probability: str):
+        """Match the reference hierarchy: quiet rank, vivid bold probability."""
+        rank = f"#{row + 1}"
+        text = f"{rank}\n{probability}"
+        value = NSMutableAttributedString.alloc().initWithString_(text)
+        value.addAttributes_range_({
+            NSFontAttributeName: NSFont.systemFontOfSize_(9),
+            NSForegroundColorAttributeName: PALETTE["muted"],
+        }, NSMakeRange(0, len(text)))
+        value.addAttributes_range_({
+            NSFontAttributeName: NSFont.boldSystemFontOfSize_(11),
+            NSForegroundColorAttributeName: (
+                PALETTE["muted"] if probability == "排序中" else PALETTE["green"]),
+        }, NSMakeRange(len(rank) + 1, len(probability)))
+        field.setAttributedStringValue_(value)
 
     @objc.python_method
     def _candidate_text_height(self, field: NSTextField) -> float:
@@ -731,7 +725,7 @@ class HudController(NSObject):
         for i, dot in enumerate(self._risk_dots):
             layer = dot.layer()
             layer.removeAnimationForKey_("risk-breathe")
-            alpha = 1.0 if i == selected else 0.28
+            alpha = 1.0 if i == selected else 0.68
             layer.setBackgroundColor_(colors[i].colorWithAlphaComponent_(alpha).CGColor())
             layer.setShadowOpacity_(0.0)
             if i == selected:
@@ -739,9 +733,10 @@ class HudController(NSObject):
                 layer.setShadowOffset_(NSMakeSize(0, 0))
                 layer.setShadowRadius_(4.0)
                 layer.setShadowOpacity_(0.55)
-                pulse = Quartz.CABasicAnimation.animationWithKeyPath_("opacity")
-                pulse.setFromValue_(0.48)
-                pulse.setToValue_(1.0)
+                # Keep the dot itself fully saturated; only its halo breathes.
+                pulse = Quartz.CABasicAnimation.animationWithKeyPath_("shadowOpacity")
+                pulse.setFromValue_(0.24)
+                pulse.setToValue_(0.72)
                 pulse.setDuration_(1.2)
                 pulse.setAutoreverses_(True)
                 pulse.setRepeatCount_(float("inf"))
@@ -771,7 +766,7 @@ class HudController(NSObject):
                     wanted.add((slot, row))
                     r = self._rows[slot][row]
                     prob = "排序中" if it["prob"] is None else f"{it['prob'] * 100:.0f}%"
-                    r["prob"].setStringValue_(f"#{row + 1}\n{prob}")
+                    self._set_probability_label(r["prob"], row, prob)
                     r["text"].setStringValue_(it["text"])
                     self._set_progress(slot, row, it["prob"])
                     for c in self._row_controls(slot, row):
@@ -933,7 +928,7 @@ class HudController(NSObject):
             self._render("status", "没选话术 · 至少选一个", PALETTE["amber"])
             return
         self._render("status", f"换话术中…（{'、'.join(active)}）", PALETTE["muted"])
-        self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
+        self._set_candidate_header("候选回复 · 生成中…")
         threading.Thread(target=self._reply_task,
                          args=(self._reply_epoch, self._regen_work,
                                text, self._last_intent, list(self.slot_tones)),
@@ -1045,7 +1040,7 @@ class HudController(NSObject):
     def applyTones_(self, payload):
         if not self._payload_current(payload):
             return
-        self.rows["cand_header"].setStringValue_(self._cand_header(payload))
+        self._set_candidate_header(self._cand_header(payload))
         total = sum(len(items) for _s, _t, items in payload)
         self._render("status", f"已换话术 · {total} 条", PALETTE["muted"])
         self._render_groups(payload)
@@ -1638,13 +1633,17 @@ class HudController(NSObject):
             self._render(key, "", PALETTE["muted"])
         if hasattr(self, "_risk_dots"):
             self._set_risk_scale(None)
-        self.rows["cand_header"].setStringValue_("候选回复")
+        if hasattr(self, "_set_candidate_header"):
+            self._set_candidate_header("候选回复")
+        else:
+            # Lightweight test harnesses load this callback without constructing AppKit.
+            self.rows["cand_header"].setStringValue_("候选回复")
         self._render("status", "等待可确认的对方消息…", PALETTE["muted"])
 
     # --- main-thread callbacks (AppKit is not thread safe)
     def applyChat_(self, title):
         self._chat_title = title
-        self._render("chat", title, PALETTE["green"])
+        self._render("chat", title, PALETTE["accent"])
 
     def applyIncoming_(self, payload):
         # a new message landed but we are not analysing yet (burst in progress):
@@ -1663,7 +1662,7 @@ class HudController(NSObject):
         self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
         self._clear_candidates()
         self._stream_rows = {}     # a new run starts at line zero in every slot
-        self.rows["cand_header"].setStringValue_("候选回复 · 等待判断…")
+        self._set_candidate_header("候选回复 · 等待判断…")
 
     def applyJudgment_(self, payload):
         v, sender, prev = payload
@@ -1700,7 +1699,7 @@ class HudController(NSObject):
         if hasattr(self, "_risk_dots"):
             self._set_risk_scale(risk)
         self._render("actions", " · ".join(v.get("actions", [])), PALETTE["text"])
-        self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
+        self._set_candidate_header("候选回复 · 生成中…")
         # the verdict landing starts a new candidate run: without this reset, the streamed
         # line counters left over from the previous message would eat every new line
         # (applyStreamLine_ drops rows beyond PER_TONE) — only applyPending_ and
@@ -1710,7 +1709,7 @@ class HudController(NSObject):
     def applyCandidates_(self, payload):
         if not self._payload_current(payload):
             return
-        self.rows["cand_header"].setStringValue_(self._cand_header(payload))
+        self._set_candidate_header(self._cand_header(payload))
         self._render_groups(payload)
 
     def applyStreamLine_(self, payload):
@@ -1732,7 +1731,7 @@ class HudController(NSObject):
         if self._collapsed:
             return      # collapse keeps the data; _set_collapsed(False) puts it back up
         r = self._rows[slot][row]
-        r["prob"].setStringValue_(f"#{row + 1}\n排序中")
+        self._set_probability_label(r["prob"], row, "排序中")
         r["text"].setStringValue_(text)
         self._set_progress(slot, row, None)
         for c in self._row_controls(slot, row):
