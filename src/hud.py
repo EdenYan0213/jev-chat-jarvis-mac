@@ -69,7 +69,7 @@ userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inheri
 
 from perception import (  # noqa: E402
     read_conversation, screen_capture_ok, request_screen_capture, warm_ocr)
-from judge import make_judge  # noqa: E402
+from judge import LowMemoryError, make_judge  # noqa: E402
 from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
@@ -1539,6 +1539,13 @@ class HudController(NSObject):
                      f" 把握 {verdict.get('confidence', 0):.0%}"
                      f" 风险 {verdict.get('risk', '?')}{note}")
                 self._push("applyJudgment:", (verdict, newest.sender, prev_text))
+            except LowMemoryError as e:
+                # The guard's refusal text is written for the user (actual GB + the
+                # cloud-fallback hint, see judge.low_memory_reason); the generic
+                # formatting below truncates at 40 chars and would cut the
+                # "TYPESAFE_API_KEY" line in half — README promises the hint.
+                _log(f"判断被内存守卫拒绝: {str(e)[:60]}")
+                self._push("applyError:", str(e))
             except Exception as e:
                 _log(f"判断失败 {type(e).__name__}: {str(e)[:60]}")
                 self._push("applyError:", f"判断失败: {type(e).__name__}: {str(e)[:40]}")
