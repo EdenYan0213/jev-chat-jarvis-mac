@@ -19,9 +19,14 @@
   </tr>
 </table>
 
-都满了或者不想进群，加个人微信（备注来意）：
+都满了或者不想进群，直接找我：加个人微信（备注来意），或关注公众号后台私信：
 
-<img src="docs/wechat-personal.png" width="200" alt="扫码加个人微信">
+<table>
+  <tr>
+    <td align="center"><img src="docs/wechat-personal.png" width="200" alt="扫码加个人微信"><br><sub>个人微信</sub></td>
+    <td align="center"><img src="docs/wechat-mp-qr.png" width="200" alt="扫码关注公众号"><br><sub>公众号</sub></td>
+  </tr>
+</table>
 
 ## 它能做什么
 

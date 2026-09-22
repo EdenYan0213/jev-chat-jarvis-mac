@@ -46,9 +46,9 @@
 
 **装**：macOS 13+，GitHub 上找 `jev-chat/jev-chat-jarvis-mac`，Releases 下载 zip，拖进「应用程序」，第一次右键 → 打开（没做公证，只需这一次）。MIT 开源。
 
-【配图 3：`docs/wechat-group-2.png` / `-3` / `-4` / `-5` 四张**按顺序**（公众号编辑器里排成 2×2，手机上比一排四张好扫），末尾再接 `docs/wechat-personal.png`】
+【配图 3：`docs/wechat-group-2.png` / `-3` / `-4` / `-5` 四张**按顺序**（公众号编辑器里排成 2×2，手机上比一排四张好扫），下面再排一排：`docs/wechat-personal.png` 与 `docs/wechat-mp-qr.png`（个人微信 + 公众号）】
 
-交流群开了 2–5 群（1 群满了扫不进人），从 2 群往下扫，满了就换下一个；都扫不进就直接加我个人微信。bug 走 GitHub Issues。
+交流群开了 2–5 群（1 群满了扫不进人），从 2 群往下扫，满了就换下一个；不想进群就加我个人微信或关注公众号，bug 走 GitHub Issues。
 
 ---
 
