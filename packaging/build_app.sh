@@ -64,6 +64,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>        <string>jev-jarvis</string>
     <key>CFBundleIconFile</key>          <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
+    <!-- torch ships no x86_64 macOS wheel (#19): keep the app on arm64 even when
+         Finder "Open using Rosetta" is ticked, instead of dying at first uv sync -->
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+    </array>
     <!-- floating helper: no Dock icon, never becomes the active app -->
     <key>LSUIElement</key>               <true/>
     <key>NSHighResolutionCapable</key>   <true/>
@@ -107,6 +113,9 @@ die() {  # show a native dialog, then exit
 }
 
 source "$RES/app/packaging/bootstrap_uv.sh" || die "包内缺少 uv 安装脚本，请重新下载应用"
+if ! jev_check_arch; then
+    die "$JEV_ARCH_ERROR"
+fi
 if ! command -v uv >/dev/null 2>&1; then
     # non-blocking: a Finder launch has no terminal, and a silent multi-minute wait
     # for uv + deps is indistinguishable from "the app is broken"
@@ -163,6 +172,7 @@ if ! xcrun --find clang >/dev/null 2>&1; then
     exit 1
 fi
 xcrun clang -std=c11 -Os -Wall -Wextra -Werror \
+    -arch arm64 \
     -mmacosx-version-min=13.0 \
     "$ROOT/packaging/launcher.c" -o "$APP/Contents/MacOS/jev-jarvis"
 
@@ -192,6 +202,8 @@ check() {  # fail the build instead of shipping a broken bundle silently
 check "Info.plist 合法"            "plutil -lint '$APP/Contents/Info.plist'"
 check "启动器可执行"                "[ -x '$APP/Contents/MacOS/jev-jarvis' ]"
 check "启动器是原生 Mach-O"         "file '$APP/Contents/MacOS/jev-jarvis' | grep -q 'Mach-O'"
+check "启动器仅含 arm64 切片"        "lipo -archs '$APP/Contents/MacOS/jev-jarvis' | grep -qw arm64"
+check "Info.plist 声明仅 arm64"     "plutil -extract LSArchitecturePriority.0 raw '$APP/Contents/Info.plist' | grep -q arm64"
 check "bootstrap 可执行"            "[ -x '$APP/Contents/Resources/launcher.zsh' ]"
 check "源码进包（hud.py）"          "[ -f '$APP/Contents/Resources/app/src/hud.py' ]"
 check "锁文件进包（uv.lock）"        "[ -f '$APP/Contents/Resources/app/uv.lock' ]"
