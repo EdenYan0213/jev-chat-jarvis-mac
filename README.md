@@ -35,7 +35,7 @@ uv run python src/judge.py "这个需求你今天跟一下"  # 单条消息出�
 uv run python src/judge_zh_test.py               # 22 条中文意图回归
 uv run python src/generate.py --check            # 生成层凭据解析
 uv run python -B -m unittest discover -s tests   # 发出消息/异步结果回归（合成 OCR，不读屏）
-python3 probe/bootstrap_regression.py            # 两种启动入口的离线回归；不联网、不实际安装
+uv run python probe/bootstrap_regression.py      # 两种启动入口的离线回归；不联网、不实际安装
 ```
 
 ## 配置
