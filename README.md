@@ -8,14 +8,20 @@
 
 ## 交流反馈
 
-用着有问题、想提需求、想一起改，扫码进群；**群快满了**，进不去就直接加个人微信（备注来意）。群二维码 7 天失效，过期了在 issue 说一声：
+用着有问题、想提需求、想一起改，扫码进群（**1 群已满，从 2 群开始扫，满了顺序换下一个**）；群二维码 7 天失效，过期了在 issue 说一声：
 
 <table>
   <tr>
-    <td align="center"><img src="docs/wechat-group.png" width="200" alt="扫码加入微信交流群"><br><sub>交流群</sub></td>
-    <td align="center"><img src="docs/wechat-personal.png" width="200" alt="扫码加个人微信"><br><sub>个人微信</sub></td>
+    <td align="center"><img src="docs/wechat-group-2.png" width="200" alt="扫码加入微信交流群 2 群"><br><sub>2 群</sub></td>
+    <td align="center"><img src="docs/wechat-group-3.png" width="200" alt="扫码加入微信交流群 3 群"><br><sub>3 群</sub></td>
+    <td align="center"><img src="docs/wechat-group-4.png" width="200" alt="扫码加入微信交流群 4 群"><br><sub>4 群</sub></td>
+    <td align="center"><img src="docs/wechat-group-5.png" width="200" alt="扫码加入微信交流群 5 群"><br><sub>5 群</sub></td>
   </tr>
 </table>
+
+都满了或者不想进群，加个人微信（备注来意）：
+
+<img src="docs/wechat-personal.png" width="200" alt="扫码加个人微信">
 
 ## 它能做什么
 
