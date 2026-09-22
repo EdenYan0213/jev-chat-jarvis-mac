@@ -113,7 +113,7 @@ class SettingsController(NSObject):
                 self.initial[f"{prefix}_{name}"] = value
                 self.controls.append(field)
             self.fields[prefix] = fields
-            hint = ("Jev 地址不含 /v1；列表接口不可用时，可手填模型。" if prefix == "TYPESAFE"
+            hint = ("Jev 地址带不带 /v1 都行，网关动作不同时可填完整动作路径；列表接口不可用时可手填模型。" if prefix == "TYPESAFE"
                     else "可手填模型。Ollama 地址通常含 /v1，密钥可填 ollama。" if prefix == "OPENAI"
                     else "使用 Anthropic 消息接口，支持自定义兼容服务地址。")
             self.label(panel, hint, 26, 43, 638, 20, 11, PALETTE["muted"])
