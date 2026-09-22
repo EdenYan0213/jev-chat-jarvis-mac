@@ -282,7 +282,7 @@ class OutgoingTests(unittest.TestCase):
         self.h._work_inner()
 
         HUD['read_conversation'].assert_called_once_with(
-            previous_wid=None, prev_fingerprint=None)
+            previous_wid=None, prev_fingerprint=None, prev_layout=None)
         self.assertEqual(self.h._win_wid, 9)
 
     def test_unknown_foreground_state_does_not_fake_an_app_switch(self):
@@ -318,9 +318,10 @@ class OutgoingTests(unittest.TestCase):
             'kCGWindowBounds': {'Width': 754, 'Height': 593},
         }
 
-        def fresh_read(previous_wid, prev_fingerprint):
+        def fresh_read(previous_wid, prev_fingerprint, prev_layout):
             self.assertIsNone(previous_wid)
             self.assertIsNone(prev_fingerprint)
+            self.assertIsNone(prev_layout)
             with patch('Quartz.CGWindowListCopyWindowInfo', return_value=[detached, main]):
                 selected = find_wechat_window(previous_wid)
             return {
