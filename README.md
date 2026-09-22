@@ -38,7 +38,7 @@
 
 ## 用法
 
-**只想用**：[Releases](https://github.com/jev-chat/jev-chat-jarvis-mac/releases/latest/download/jev-chat-jarvis-macos.zip) 下载 `.app`，解压拖进「应用程序」，**第一次右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）。
+**只想用**：[Releases](https://github.com/jev-chat/jev-chat-jarvis-mac/releases/latest/download/jev-jarvis-macos-latest.zip) 下载 `.app`，解压拖进「应用程序」，**第一次右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）。
 
 ![「已损坏，无法打开」的报错弹窗](docs/troubleshoot-damaged.png)
 

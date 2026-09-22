@@ -33,7 +33,7 @@
 ## 其它
 
 - **启动器更结实**（#20）：缺 uv 时自动下载安装（带超时与重试），失败提示区分网络 / 证书 / 磁盘 / 安装器错误；启动器改成原生 Mach-O，启动不再依赖脚本解释器
-- **下载链接稳定**（#31）：每次发版同时上传固定资产名 `jev-chat-jarvis-macos.zip`，`releases/latest/download/` 固定链接长期可用，发版后自动自检指针
+- **下载链接稳定**（#31）：每次发版同时上传固定资产名 `jev-jarvis-macos-latest.zip`（版本包为 `jev-jarvis-macos-v<版本>.zip`），`releases/latest/download/` 固定链接长期可用，发版后自动自检指针
 - **文档**：README 精简，补了「已损坏，无法打开」的排障、本地模型与 venv 的位置/大小/清理方式；交流反馈区加入个人微信
 - **测试**：补上单元测试（发出消息、异步结果、输入区、模型设置）和离线启动回归 `probe/bootstrap_regression.py`
 

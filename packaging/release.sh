@@ -8,7 +8,7 @@
 # published silently.
 #
 # Usage:
-#   ./packaging/release.sh                     # -> dist/jev-jarvis-<version>-macos.zip + SHA256SUMS
+#   ./packaging/release.sh                     # -> dist/jev-jarvis-macos-v<version>.zip + SHA256SUMS
 #   ./packaging/release.sh --out /tmp/rel      # somewhere else
 #   ./packaging/release.sh --sign "Developer ID Application: X (TEAM)"
 #                                              # 有开发者证书才用；--sign - 是 ad-hoc（不解决 Gatekeeper）
@@ -72,7 +72,7 @@ else
     echo "==> 跳过签名（本机没有开发者证书）"
 fi
 
-ZIP="$OUT/jev-jarvis-$VERSION-macos.zip"
+ZIP="$OUT/jev-jarvis-macos-v$VERSION.zip"
 rm -f "$ZIP"
 echo "==> 压缩"
 # --keepParent: the zip must contain jev-jarvis.app/ itself, so unzipping gives an app
@@ -80,7 +80,7 @@ ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 ( cd "$OUT" && shasum -a 256 "$(basename "$ZIP")" > SHA256SUMS )
 # fixed asset name so releases/latest/download/<name> is a permanent link (brew taps,
 # installers, docs): uploaded alongside the versioned zip on every release (#31)
-STABLE="$OUT/jev-chat-jarvis-macos.zip"
+STABLE="$OUT/jev-jarvis-macos-latest.zip"
 cp "$ZIP" "$STABLE"
 
 TMP="$(mktemp -d)"
@@ -138,7 +138,7 @@ if [ "$PUBLISH" = 1 ]; then
     # since the zip was built
     [ -n "$TARGET" ] && RELEASE_ARGS+=(--target "$TARGET")
     gh release create "${RELEASE_ARGS[@]}"
-    echo "    已发布 $TAG（含稳定名资产 jev-chat-jarvis-macos.zip）"
+    echo "    已发布 $TAG（含稳定名资产 jev-jarvis-macos-latest.zip）"
 
     # post-publish self-check (#31): never trust the default "Latest" pointer — a late
     # hotfix of an old version would silently re-point every latest/ download URL
@@ -155,12 +155,12 @@ if [ "$PUBLISH" = 1 ]; then
     fi
     echo "    ✓ Latest 指针 = $TAG"
     slug="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-    code="$(curl -sIL -o /dev/null -w '%{http_code}' "https://github.com/$slug/releases/latest/download/jev-chat-jarvis-macos.zip" || true)"
+    code="$(curl -sIL -o /dev/null -w '%{http_code}' "https://github.com/$slug/releases/latest/download/jev-jarvis-macos-latest.zip" || true)"
     if [ "$code" != "200" ]; then
-        echo "    ✗ 稳定链接不可用（HTTP $code），检查资产 jev-chat-jarvis-macos.zip 是否上传成功" >&2
+        echo "    ✗ 稳定链接不可用（HTTP $code），检查资产 jev-jarvis-macos-latest.zip 是否上传成功" >&2
         exit 1
     fi
-    echo "    ✓ 稳定链接可下载（releases/latest/download/jev-chat-jarvis-macos.zip）"
+    echo "    ✓ 稳定链接可下载（releases/latest/download/jev-jarvis-macos-latest.zip）"
 else
     echo
     echo "    下一步（发 GitHub Release）："
