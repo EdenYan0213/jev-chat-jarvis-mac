@@ -84,6 +84,17 @@ class WindowInfo:
 
 # --------------------------------------------------------------------------- window
 
+# The names WeChat reports for itself and for its main chat window on macOS. Mainland
+# builds report 微信; some locales and 4.x builds report WeChat or Weixin. One list,
+# matched EXACTLY, because both directions of the substring test that used to live at
+# the call sites were wrong: `"WeChat" in owner or "微信" in owner` missed the Weixin
+# alias entirely (a 4.x build reporting that name found no window at all, and the panel
+# simply disappeared), while accepting any owner that merely *contains* 微信 — 微信读书,
+# 微信输入法 and 企业微信 own titled windows that clear the 600x400 gate below, so their
+# pixels could be captured and OCR'd as chat text (#50). A new alias is now one edit
+# here instead of one edit per call site.
+WECHAT_APP_NAMES = ("微信", "WeChat", "Weixin")
+
 
 def screen_capture_ok() -> bool:
     """False when macOS has not granted Screen Recording to this app.
@@ -121,23 +132,30 @@ def frontmost_app_is_wechat() -> bool | None:
             return None
         bundle = app.bundleIdentifier() or ""
         name = app.localizedName() or ""
-        return bundle == "com.tencent.xinWeChat" or name in ("微信", "WeChat", "Weixin")
+        return bundle == "com.tencent.xinWeChat" or name in WECHAT_APP_NAMES
     except Exception:
         return None
 
 
 def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
-    """Prefer the main chat window over larger detached WeChat windows."""
-    # Current mainland builds report the main window/app as ``Weixin`` on some
-    # macOS locales.  Without that alias a larger detached web/mini-program
-    # window wins the area tiebreak and its old pixels are OCR'd as the chat.
-    main_titles = ("微信", "WeChat", "Weixin")
+    """Prefer the main chat window over larger detached WeChat windows.
+
+    Window ownership is matched exactly against WECHAT_APP_NAMES. It used to be a
+    substring test, which missed the ``Weixin`` alias — a 4.x build reporting that name
+    found no window at all, so the panel just disappeared — and at the same time let
+    any owner containing 微信 through, including sibling apps whose own titled windows
+    clear the size gate below (#50).
+
+    This filters on the owning *app*, not on the window, so WeChat's detached
+    mini-program and web windows still carry owner ``WeChat`` and stay eligible — that
+    is what keeps the main-window-absent fallback working.
+    """
     opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
     wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
     best: WindowInfo | None = None
     for w in wins:
         owner = w.get("kCGWindowOwnerName") or ""
-        if "WeChat" not in owner and "微信" not in owner:
+        if owner not in WECHAT_APP_NAMES:
             continue
         title = w.get("kCGWindowName") or ""
         b = dict(w.get("kCGWindowBounds") or {})
@@ -151,9 +169,11 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
         # main window: has a title, layer 0-ish, big, roughly window-shaped
         if not title or wi.w < 600 or wi.h < 400:
             continue
-        # only a titled, window-sized window can be the main chat window
-        if best is None or (wi.title in main_titles, wi.w * wi.h, wi.wid) > (
-                best.title in main_titles, best.w * best.h, best.wid):
+        # only a titled, window-sized window can be the main chat window. The main window
+        # is titled with the app's own display name, so this priority check reads the same
+        # list rather than keeping a second copy that drifts out of step (#50).
+        if best is None or (wi.title in WECHAT_APP_NAMES, wi.w * wi.h, wi.wid) > (
+                best.title in WECHAT_APP_NAMES, best.w * best.h, best.wid):
             best = wi
 
     # stick with the window we already chose: WeChat 4.x keeps several equally-sized
@@ -162,7 +182,7 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
     if previous_wid is not None and best is not None and best.wid != previous_wid:
         for w in wins:
             owner = w.get("kCGWindowOwnerName") or ""
-            if "WeChat" not in owner and "微信" not in owner:
+            if owner not in WECHAT_APP_NAMES:
                 continue
             if int(w.get("kCGWindowNumber") or 0) != previous_wid:
                 continue
@@ -171,7 +191,7 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
             pw = float(b.get("Width", 0))
             ph = float(b.get("Height", 0))
             if (title and pw >= 600 and ph >= 400
-                    and (title in main_titles) == (best.title in main_titles)):
+                    and (title in WECHAT_APP_NAMES) == (best.title in WECHAT_APP_NAMES)):
                 return WindowInfo(wid=previous_wid, pid=int(w.get("kCGWindowOwnerPID") or 0),
                                   title=title, x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
                                   w=pw, h=ph)
