@@ -195,6 +195,8 @@ class HudController(NSObject):
         self._read_once = False        # first OCR call includes Vision's own load
         self._last_skip_reason = None
         self.judge = make_judge()
+        self._normal_status = ("等待微信消息…", PALETTE["muted"])
+        self._model_status = None
         self.generator = Generator()
         # 话术: per-slot tone selection. A slot on 不用 contributes no request and no rows,
         # so the panel is exactly as tall as the groups actually in use.
@@ -765,6 +767,13 @@ class HudController(NSObject):
 
     @objc.python_method
     def _render(self, key: str, text: str, color: NSColor | None = None):
+        if key == "status":
+            self._normal_status = (text, color)
+            status = self.judge.load_status
+            # A red error line stays visible: a concurrent progress status must not
+            # repaint over it, and _normal_status keeps it after the load ends.
+            if status and color is not PALETTE["red"]:
+                text, color = status, PALETTE["amber"]
         tf = self.rows[key]
         if key == "message" and text != self._message_text:
             self._message_expanded = False
@@ -1261,6 +1270,25 @@ class HudController(NSObject):
 
     # --------------------------------------------------------------- loop
     @objc.python_method
+    def _refresh_model_status(self):
+        """Repaint the status line while a load/progress status is live (this PR).
+
+        Runs before the paused/busy/read gates so progress stays visible while OCR is
+        in flight; `_normal_status` decides what the line falls back to.
+        """
+        status = self.judge.load_status
+        if status != self._model_status:
+            was_live = self._model_status is not None
+            self._model_status = status
+            if status:
+                self._show()
+            elif was_live and self._wechat_frontmost is False:
+                # The load just finished; applyHidden_ kept the panel up while it ran,
+                # so a WeChat that left in the meantime is hidden only now (review #41).
+                if self.panel.isVisible():
+                    self.panel.orderOut_(None)
+            self._render("status", *self._normal_status)
+
     def _set_foreground_state(self, frontmost):
         """Apply one hard lifecycle boundary when WeChat gains/loses focus."""
         if frontmost is None or frontmost is self._wechat_frontmost:
@@ -1296,6 +1324,9 @@ class HudController(NSObject):
         return True
 
     def tick_(self, timer):
+        # Progress/status refresh first: a live download must stay visible even while
+        # WeChat is gone or the read loop is gated (applyHidden_ keeps the panel up).
+        self._refresh_model_status()
         # Check activation before pause/busy/read-cadence gates.  The timer keeps
         # firing while OCR is in flight, so a quick WeChat -> Chrome -> WeChat
         # round trip still advances _foreground_epoch and retires that capture.
@@ -2017,7 +2048,7 @@ class HudController(NSObject):
     def applyHidden_(self, reason):
         # WeChat gone or unreadable -> take the panel away (the app "opens with WeChat")
         self._render("status", reason, PALETTE["muted"])
-        if self.panel.isVisible():
+        if self.panel.isVisible() and not self.judge.load_status:
             self.panel.orderOut_(None)
         if self._ov_panel.isVisible():
             self._ov_panel.orderOut_(None)

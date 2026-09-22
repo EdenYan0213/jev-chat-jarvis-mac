@@ -207,6 +207,50 @@ def low_memory_reason() -> str | None:
                 "可配置 TYPESAFE_API_KEY 走云端判断")
     return None
 
+def _download_progress(report):
+    """A per-load HF progress bar: no global patch, disk scan, or UI work here."""
+    from huggingface_hub.utils import tqdm as HubProgress
+    from tqdm.auto import tqdm
+
+    class DownloadProgress(HubProgress):
+        def __init__(self, *args, **kwargs):
+            name = kwargs.pop("name", "") or ""
+            # Count completed model bytes, not compressed Xet transfer bytes.
+            self._model_bytes = kwargs.get("unit") == "B" and not name.endswith(".transfer")
+            if self._model_bytes:
+                kwargs["disable"] = False  # Finder / HF quiet mode still needs UI progress
+            # Keep HF bar names, but bypass its terminal-only disable switch.
+            tqdm.__init__(self, *args, **kwargs)
+            self._report()
+
+        def display(self, *args, **kwargs):
+            if self.fp.isatty():
+                return super().display(*args, **kwargs)
+
+        def _report(self):
+            if self._model_bytes and self.total:
+                done = min(self.n, self.total)
+                report(f"下载判断模型 {int(done / self.total * 100)}% · "
+                       f"{done / 1e9:.1f}/{self.total / 1e9:.1f} GB")
+
+        def update(self, n=1):
+            result = super().update(n)
+            self._report()
+            return result
+
+        def refresh(self, *args, **kwargs):
+            result = super().refresh(*args, **kwargs)
+            if hasattr(self, "n"):
+                self._report()
+            return result
+
+        def close(self):
+            if not self.disable and self._model_bytes and self.total:
+                report("加载判断模型…")
+            super().close()
+
+    return DownloadProgress
+
 
 class Judge:
     """Wraps a decoder-only decision model; lazy-loads on first use."""
@@ -221,6 +265,7 @@ class Judge:
         self.repo = repo
         self.temperature = 1.3
         self._loaded = False
+        self.load_status = None
         # RLock, not Lock: warm() holds it across the whole dummy forward, and judge()
         # inside that same call re-enters _load(). One lock guards both the load and the
         # first forward, so a warm-up and a real judgment can never run a forward at the
@@ -250,23 +295,30 @@ class Judge:
                 raise ModelNotDownloadedError(reason)
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
-            t = self.torch
-            self.tok = AutoTokenizer.from_pretrained(self.repo)
-            # float16, not bfloat16: MPS takes the slow path for bf16 (limited op coverage) and
-            # it costs exactly 2x here — measured on this model, same prompt, three runs each:
-            # bf16 1352/1393/1467 ms vs fp16 734/745/827 ms. The judge is the single biggest
-            # steady-state cost in the pipeline, so this is the difference between a ~3 s and a
-            # ~4 s reply. CPU has no fp16 win, so it stays fp32.
-            dtype = t.float16 if self.device == "mps" else t.float32
-            # low_cpu_mem_usage: stream weights layer-by-layer via the meta device instead
-            # of materializing a full CPU copy first — it flattens the load-time memory
-            # peak, which is exactly what killed #37's machine. Load gets a bit slower;
-            # steady-state inference is untouched.
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.repo, dtype=dtype, low_cpu_mem_usage=True).to(self.device).eval()
-            self._letters = [self.tok.encode(c, add_special_tokens=False)[0]
-                             for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
-            self._loaded = True
+            self.load_status = "加载判断模型…"
+            try:
+                t = self.torch
+                self.tok = AutoTokenizer.from_pretrained(self.repo)
+                # float16, not bfloat16: MPS takes the slow path for bf16 (limited op coverage) and
+                # it costs exactly 2x here — measured on this model, same prompt, three runs each:
+                # bf16 1352/1393/1467 ms vs fp16 734/745/827 ms. The judge is the single biggest
+                # steady-state cost in the pipeline, so this is the difference between a ~3 s and a
+                # ~4 s reply. CPU has no fp16 win, so it stays fp32.
+                dtype = t.float16 if self.device == "mps" else t.float32
+                # low_cpu_mem_usage: stream weights layer-by-layer via the meta device instead
+                # of materializing a full CPU copy first — it flattens the load-time memory
+                # peak, which is exactly what killed #37's machine. Load gets a bit slower;
+                # steady-state inference is untouched. tqdm_class (this PR) reports download
+                # progress to the panel through load_status; the two kwargs are independent.
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.repo, dtype=dtype, low_cpu_mem_usage=True,
+                    tqdm_class=_download_progress(
+                        lambda text: setattr(self, "load_status", text))).to(self.device).eval()
+                self._letters = [self.tok.encode(c, add_special_tokens=False)[0]
+                                 for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
+                self._loaded = True
+            finally:
+                self.load_status = None
 
     def warm(self) -> None:
         """Load the model and run one real-shaped forward, so no real message pays for it.
@@ -279,7 +331,11 @@ class Judge:
         """
         with self._load_lock:
             self._load()
-            self.judge("预热")
+            self.load_status = "预热判断模型…"
+            try:
+                self.judge("预热")
+            finally:
+                self.load_status = None
 
     def _slot_probs(self, logits_by_slot: list, n_options: int, slot: int) -> np.ndarray:
         logits = logits_by_slot[slot]
@@ -391,6 +447,10 @@ class FallbackJudge:
         self.local = None
         self.fell_back = False
         self.reason = ""
+
+    @property
+    def load_status(self):
+        return self.local.load_status if self.local is not None else None
 
     def _fallback(self):
         if self.local is None:
