@@ -37,6 +37,7 @@ The names are the conventional ones you likely already export for other tools:
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 
 PROJECT_ENV = Path(__file__).resolve().parent.parent / ".env"
@@ -68,6 +69,25 @@ CONFIG_DIR = Path.home() / ".config" / "jev-jarvis"
 ENV_FILE = CONFIG_DIR / "env"
 
 
+def split_env_comment(value: str) -> tuple[str, str]:
+    """Split shell comments outside quotes, including escaped/concatenated quotes."""
+    quote = None
+    escaped = False
+    for i, ch in enumerate(value):
+        if escaped:
+            escaped = False
+        elif ch == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and i > 0 and value[i - 1] in " \t":
+            return value[:i].rstrip(), value[i:]
+    return value, ""
+
+
 def parse_env_file(path: Path) -> dict[str, str]:
     """Parse a shell-style env file: KEY=VALUE, optional `export`, quotes, # comments.
 
@@ -92,19 +112,14 @@ def parse_env_file(path: Path) -> dict[str, str]:
         key, val = line.split("=", 1)
         key, val = key.strip(), val.strip()
 
-        quote, cut = None, len(val)
-        for i, ch in enumerate(val):
-            if quote:
-                if ch == quote:
-                    quote = None
-            elif ch in "\"'":
-                quote = ch
-            elif ch == "#" and i > 0 and val[i - 1] in " \t":
-                cut = i
-                break
-        val = val[:cut].strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-            val = val[1:-1]
+        val, _comment = split_env_comment(val)
+        try:
+            lexer = shlex.shlex(val, posix=True)
+            lexer.whitespace = ""
+            lexer.commenters = ""
+            val = "".join(lexer)
+        except ValueError:
+            continue  # malformed shell quoting is not a usable setting
         if key:
             out[key] = val
     return out
@@ -127,7 +142,12 @@ def _label() -> str:
     return ", ".join(str(f).replace(home, "~") for f in paths)
 
 
+_startup_sources: list[tuple[str, dict[str, str]]] | None = None
+
+
 def _sources() -> list[tuple[str, dict[str, str]]]:
+    if _startup_sources is not None:
+        return _startup_sources
     return [
         ("环境变量", dict(os.environ)),
         (_label(), _merged_env_file()),
@@ -175,6 +195,10 @@ def provider(prefix: str) -> dict[str, str]:
 
 def load() -> dict[str, str]:
     """Copy the user env files into os.environ (variables already set win)."""
+    global _startup_sources
+    # Keep this process on its startup configuration: settings saves require restart.
+    if _startup_sources is None:
+        _startup_sources = _sources()
     loaded = _merged_env_file()
     for key, val in loaded.items():
         if val and not os.environ.get(key):

@@ -323,6 +323,18 @@ class HudController(NSObject):
         # "意图识别率 100%" measures 103 px at 12 pt.
         # Every control is created once and then placed by _relayout(), which is what lets
         # the panel change height when the tone selection changes.
+        self.settings_button = self._make_button(PANEL_W - 42, 0, 28, 28,
+                                                 "", "openSettings:", 0)
+        self.settings_button.setImage_(AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "gearshape", "模型设置"))
+        self.settings_button.setImagePosition_(AppKit.NSImageOnly)
+        self.settings_button.setBordered_(False)
+        self.settings_button.setContentTintColor_(PALETTE["muted"])
+        self.settings_button.setToolTip_("模型设置")
+        self.settings_button.setAccessibilityLabel_("模型设置")
+        self.settings_button.setHidden_(False)
+        view.addSubview_(self.settings_button)
+        self._fixed.append((self.settings_button, PANEL_W - 42, 24, 28, 28))
         dy = 30
         for key, size, color, bold, height in (
             ("chat", 12, PALETTE["green"], True, 18),      # 群名 / 联系人
@@ -334,13 +346,14 @@ class HudController(NSObject):
             ("risk", 14, PALETTE["green"], True, 20),
             ("actions", 13, PALETTE["text"], False, 18),
         ):
-            tf = self._make_label(14, 0, PANEL_W - 28, height,
+            width = PANEL_W - 68 if key == "chat" else PANEL_W - 28
+            tf = self._make_label(14, 0, width, height,
                                   size=size, color=color, bold=bold)
             if key == "message":
                 tf.cell().setWraps_(True)
             view.addSubview_(tf)
             self.rows[key] = tf
-            self._fixed.append((tf, 14, dy, PANEL_W - 28, height))
+            self._fixed.append((tf, 14, dy, width, height))
             dy += height + 8
 
         # ---- candidates section
@@ -530,6 +543,7 @@ class HudController(NSObject):
             ("暂停读屏", "togglePause:", ""),
             ("YOLO 检测框", "toggleBoxes:", ""),
             ("立即重新分析", "reanalyze:", ""),
+            ("模型设置…", "openSettings:", ","),
         ):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
@@ -541,6 +555,19 @@ class HudController(NSObject):
         self.boxes_item.setState_(
             AppKit.NSOnState if self._show_boxes else AppKit.NSOffState)
         self.status_item.setMenu_(menu)
+
+    def openSettings_(self, sender):
+        from settings import SettingsController
+        if getattr(self, "settings_controller", None) and self.settings_controller.window.isVisible():
+            self.settings_controller.show()
+            return
+        try:
+            self.settings_controller = SettingsController.alloc().init().build()
+            self.settings_controller.show()
+        except OSError:
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("无法读取配置文件，请检查文件权限。")
+            alert.runModal()
 
     @objc.python_method
     def _make_label(self, x, y, w, h, size=13, color=None, bold=False):

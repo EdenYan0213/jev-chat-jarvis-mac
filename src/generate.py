@@ -8,8 +8,8 @@ Two API shapes are supported, because providers disagree:
     openai     POST {base}/v1/chat/completions   Authorization: Bearer   -> choices[0].message.content
     anthropic  POST {base}/v1/messages           x-api-key + version    -> content[].text
 推 most providers (DeepSeek, 通义, Moonshot, SiliconFlow, Ollama, vLLM, OpenRouter) only
-speak the OpenAI shape; 智谱 and a few gateways offer both. The shape is inferred.
-one, otherwise it is inferred from the base URL (a path containing "anthropic" => anthropic).
+speak the OpenAI shape; 智谱 and a few gateways offer both. User key prefixes select
+the shape; built-in credentials infer it from the base URL.
 
 Nothing is ever written back, and the key is never logged. Run
 `uv run python src/generate.py --check` to see which source is in use (key masked).
@@ -255,18 +255,18 @@ def load_credentials() -> tuple[str, str, str, str, str]:
     for other tools works here:
         OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL         the common case
         ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
-    The API shape is inferred from the endpoint (a path containing "anthropic" means the
-    Anthropic /v1/messages format; everything else is assumed OpenAI-shaped).
+    User credentials select the API shape by their prefix, including custom endpoints
+    whose URL contains no provider name. Built-in credentials still infer from the URL.
     """
     oai = userconfig.provider("OPENAI")
     anth = userconfig.provider("ANTHROPIC")
 
     if oai["key"]:
         base = oai["base"] or DEFAULT_OPENAI_BASE
-        return base, oai["key"], oai["model"] or DEFAULT_MODEL, oai["source"], pick_api_format(base, None)
+        return base, oai["key"], oai["model"] or DEFAULT_MODEL, oai["source"], "openai"
     if anth["key"]:
         base = anth["base"] or DEFAULT_ANTHROPIC_BASE
-        return base, anth["key"], anth["model"] or DEFAULT_MODEL, anth["source"], pick_api_format(base, None)
+        return base, anth["key"], anth["model"] or DEFAULT_MODEL, anth["source"], "anthropic"
 
     # 两个都没配：回退到随包分发的内置凭据，让应用开箱就能出候选。位置在最后，
     # 所以内置永远不会盖掉用户显式配的那一组。
