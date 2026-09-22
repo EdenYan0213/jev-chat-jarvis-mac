@@ -1,4 +1,4 @@
-# jev-jarvis（macOS）
+# jev-chat-jarvis（macOS）
 
 微信弹出一条消息 → 悬浮窗立刻告诉你**这句话的真实意图**、**风险几级**、**该怎么回**。
 

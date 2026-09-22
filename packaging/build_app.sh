@@ -53,8 +53,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>              <string>jev-jarvis</string>
-    <key>CFBundleDisplayName</key>       <string>jev-jarvis</string>
+    <key>CFBundleName</key>              <string>jev-chat-jarvis</string>
+    <key>CFBundleDisplayName</key>       <string>jev-chat-jarvis</string>
     <key>CFBundleIdentifier</key>        <string>${BUNDLE_ID}</string>
     <key>CFBundleVersion</key>           <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
@@ -67,9 +67,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key>   <true/>
     <!-- permission prompts are shown by the system; these strings explain why -->
     <key>NSScreenCaptureUsageDescription</key>
-    <string>jev-jarvis 需要读取微信窗口的画面，才能在本地识别消息文字（不上传）。</string>
+    <string>jev-chat-jarvis 需要读取微信窗口的画面，才能在本地识别消息文字（不上传）。</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>jev-jarvis 需要把选中的回复粘贴到微信输入框。</string>
+    <string>jev-chat-jarvis 需要把选中的回复粘贴到微信输入框。</string>
 </dict>
 </plist>
 PLIST
@@ -100,7 +100,7 @@ log() { print -r -- "[$(date '+%F %T')] $*" >> "$LOG" }
 
 die() {  # show a native dialog, then exit
     log "FATAL: $1"
-    osascript -e "display alert \"jev-jarvis 启动失败\" message \"$1\n\n详情: $LOG\" as critical" >/dev/null 2>&1
+    osascript -e "display alert \"jev-chat-jarvis 启动失败\" message \"$1\n\n详情: $LOG\" as critical" >/dev/null 2>&1
     exit 1
 }
 
@@ -108,7 +108,7 @@ if ! command -v uv >/dev/null 2>&1; then
     log "未找到 uv，正在用官方脚本安装"
     # non-blocking: a Finder launch has no terminal, and a silent multi-minute wait
     # for uv + deps is indistinguishable from "the app is broken"
-    osascript -e 'display notification "首次启动：正在安装 uv（约 10 MB）" with title "jev-jarvis"' >/dev/null 2>&1
+    osascript -e 'display notification "首次启动：正在安装 uv（约 10 MB）" with title "jev-chat-jarvis"' >/dev/null 2>&1
     curl -LsSf https://astral.sh/uv/install.sh >>"$LOG" 2>&1
 fi
 # re-check rather than trust the installer: PATH above already covers ~/.local/bin
@@ -136,7 +136,7 @@ fi
 if [ "$ready" = 0 ]; then
     rm -rf "$VENV"
     log "正在创建虚拟环境并安装依赖（需要几分钟，请保持联网）"
-    osascript -e 'display notification "正在准备运行环境（几分钟，需联网）" with title "jev-jarvis"' >/dev/null 2>&1
+    osascript -e 'display notification "正在准备运行环境（几分钟，需联网）" with title "jev-chat-jarvis"' >/dev/null 2>&1
     # --frozen: use the shipped uv.lock exactly, never re-resolve at runtime
     if ! uv sync --frozen --python "@PYTHON_PIN@" --project "$RES/app" --quiet >>"$LOG" 2>&1; then
         die "依赖安装失败，请查看日志"

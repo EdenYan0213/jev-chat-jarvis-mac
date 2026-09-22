@@ -95,7 +95,7 @@
 
 面板用 `NSWindowStyleMaskNonactivatingPanel` —— 点它不抢微信的焦点，你打字不被打断。
 
-打包上我没用 py2app / PyInstaller：把 torch + transformers 冻进去会做出 **2–4 GB** 的 App。改成「启动器包」—— 包里只带源码（约 **400 KB**），首次启动时用 uv 在 `~/Library/Application Support` 建虚拟环境（依赖在 uv 缓存里，实测 3 秒）。**顺带还拿到一个独立身份**：屏幕录制 / 辅助功能这两个权限授权给「jev-jarvis」这个应用本身，而不是启动它的那个终端 —— 这点用命令行跑是没有的。
+打包上我没用 py2app / PyInstaller：把 torch + transformers 冻进去会做出 **2–4 GB** 的 App。改成「启动器包」—— 包里只带源码（约 **400 KB**），首次启动时用 uv 在 `~/Library/Application Support` 建虚拟环境（依赖在 uv 缓存里，实测 3 秒）。**顺带还拿到一个独立身份**：屏幕录制 / 辅助功能这两个权限授权给「jev-chat-jarvis」这个应用本身，而不是启动它的那个终端 —— 这点用命令行跑是没有的。
 
 ### 5. 风险分级为什么显示「均值取整」
 
@@ -130,7 +130,7 @@ decider-2b 的分布是平滑的，**最高档概率从不超过 0.4**（实测 
 
 ```bash
 git clone https://github.com/jev-chat/jev-chat-jarvis-mac.git
-cd jev-jarvis
+cd jev-chat-jarvis-mac
 ./start.command          # 会自动用 uv 建环境（没装 uv 也会自己装）
 ```
 
