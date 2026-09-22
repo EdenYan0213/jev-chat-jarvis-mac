@@ -187,6 +187,34 @@ def _strip_quotes(s: str) -> str:
     return _QUOTES.sub("", s)
 
 
+def base_has_version_segment(base: str) -> bool:
+    """True when the base URL already ends in a version segment (`…/v1`, `…/v4`).
+
+    Providers disagree about whether the version belongs to the base, so both spellings
+    must compose to the same request URL. Shared with judge_jev (#42), which appends its
+    own action path by the same rule — a user who copies a working generation-layer
+    base into TYPESAFE_BASE_URL must not suddenly get `/v1/v1/…`.
+    """
+    b = (base or "").rstrip("/")
+    segs = [s for s in urllib.parse.urlsplit(b).path.split("/") if s]
+    return bool(segs) and bool(re.fullmatch(r"v\d+[a-z]*", segs[-1].lower()))
+
+
+def base_is_verbatim_action(base: str) -> bool:
+    """True when base already ends in version+action (`…/v1/evaluate`): use it as-is.
+
+    Gateways do not even agree on the action name — Vercel AI Gateway exposes TypeSafe
+    under `/v1/evaluate`, not `/v1/systemone` (#42) — so a base ending in
+    `<version>/<segment>` is taken as a complete request URL. A plain prefix like
+    `…/api` does NOT match (the segment before last is not a version), keeping the
+    pre-existing `…/api/v1/systemone` behaviour for gateway path prefixes.
+    """
+    b = (base or "").rstrip("/")
+    segs = [s for s in urllib.parse.urlsplit(b).path.split("/") if s]
+    return (len(segs) >= 2
+            and bool(re.fullmatch(r"v\d+[a-z]*", segs[-2].lower())))
+
+
 def _endpoint(base: str, api: str) -> str:
     """Compose the request URL, tolerating both base-URL conventions.
 
@@ -197,8 +225,7 @@ def _endpoint(base: str, api: str) -> str:
     So: if the base already ends in a version segment, append only the path.
     """
     b = (base or "").rstrip("/")
-    last = b.rsplit("/", 1)[-1].lower()
-    has_version = bool(re.fullmatch(r"v\d+[a-z]*", last))
+    has_version = base_has_version_segment(b)
     if api == "anthropic":
         return b + ("/messages" if has_version else "/v1/messages")
     return b + ("/chat/completions" if has_version else "/v1/chat/completions")
