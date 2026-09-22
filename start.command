@@ -10,6 +10,11 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 LOG="$HOME/Library/Logs/jev-jarvis.log"
 mkdir -p "$(dirname "$LOG")" || exit 1
 source ./packaging/bootstrap_uv.sh || exit 1
+if ! jev_check_arch; then
+    print -r -- "$JEV_ARCH_ERROR"
+    print -r -- "详情：$LOG"
+    exit 1
+fi
 if ! command -v uv >/dev/null 2>&1; then
     print "未找到 uv，正在自动安装；进度日志：$LOG"
 fi
