@@ -39,6 +39,7 @@ gh issue edit <n> --add-assignee @me
 |---|---|
 | 感知层 `perception.py` | CLI 进程里验不了读屏（会静默降级）——起真应用看 `~/Library/Logs/jev-jarvis.log`，日志刻意不含消息正文，可放心贴进 PR |
 | 判断层 `judge.py`（尤其 prompt） | `uv run python src/judge_zh_test.py`——意图回归，数字退了不许合 |
+| 发出消息识别 / 回复目标切换（`perception.py` + `hud.py`） | `uv run python -B -m unittest discover -s tests`——离线回归（合成 OCR，不读屏、不调 API、不读凭据） |
 | 生成层 `generate.py` | `uv run python src/generate.py --check`（凭据解析）+ 真跑一条候选生成确认非空 |
 | 悬浮窗/轮询 `hud.py` | 起真应用走一轮完整流程：消息出现 → 判断 → 候选上屏 → 一键填入 |
 
@@ -49,6 +50,16 @@ gh issue edit <n> --add-assignee @me
 - 轮询与线程结构别「顺手优化」：停稳窗口与最小分析间隔是防刷屏上限、不能删，分析跑在独立线程（`hud.py` 内注释有原因），塞回轮询线程会让分析期间读屏停摆。
 - 改了用户可见行为 → 同步 `README.md`；改动不能破坏纯只读原则和「填入走辅助功能接口」的实现（别改回剪贴板 + Cmd+V，原因见 `src/fill.py` 顶部注释）。
 - PR 描述里标注改动类型：【新增】/【修改】/【删除】各点了哪些类、方法、配置，方便 review。
+
+## Issue 标签约定
+
+提 issue、处理 issue 都要打标签，方便筛选与认领：
+
+- **类型标签必打，且只有一个**：`bug`（缺陷）/ `enhancement`（功能建议）/ `question`（提问）/ `documentation`（文档）。没有类型标签的 issue 无法按缺陷/改进筛选。
+- **模块标签 `area/*` 按需可多打**（不能替代类型标签）：`area/perception`（读屏 OCR）、`area/judge`（判断层）、`area/generate`（生成层）、`area/hud`（悬浮窗）、`area/fill`（填入）、`area/config`（配置）、`area/packaging`（打包与启动）、`area/docs`（文档）。
+- 宁可晚打不要错打；`wontfix` / `invalid` 关闭时要在回复里说明理由。
+
+命令：`gh issue edit <n> --add-label "bug" --add-label "area/perception"`。
 
 ## 有问题？
 
