@@ -59,6 +59,20 @@ class ConversationStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.set_active_session("Alice", other.id)
 
+    def test_change_token_tracks_sessions_messages_and_names(self):
+        original = self.store.change_token()
+        session = self.store.resolve_session("Alice")
+        after_session = self.store.change_token()
+        self.assertNotEqual(original, after_session)
+
+        self.store.append_messages(
+            session.id, [MessageInput("them", "Alice", "hello")])
+        after_message = self.store.change_token()
+        self.assertNotEqual(after_session, after_message)
+
+        self.store.rename_session(session.id, "Other")
+        self.assertNotEqual(after_message, self.store.change_token())
+
     def test_append_messages_preserves_both_sides_sender_and_order(self):
         session = self.store.resolve_session("Group")
         added = self.store.append_messages(session.id, [

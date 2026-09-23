@@ -68,6 +68,19 @@ class SessionManagerModelTests(unittest.TestCase):
             ],
         )
 
+    def test_create_adds_and_activates_session_for_selected_chat(self):
+        first = self.store.resolve_session("Alice")
+
+        created = self.model.create("Alice", "新的会话")
+
+        self.assertNotEqual(created.id, first.id)
+        self.assertEqual(created.name, "新的会话")
+        self.assertEqual(created.chat_key, "Alice")
+        self.assertEqual(
+            self.store.active_session("Alice").id, created.id)
+        self.assertIn(
+            created.id, [row.id for row in self.model.active_rows()])
+
     def test_rename_trash_restore_and_scheduled_deletion(self):
         session = self.store.resolve_session("Alice")
         self.model.rename(session.id, "重要会话")

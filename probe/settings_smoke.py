@@ -111,6 +111,14 @@ try:
         assert '消息记录（2 条）' in c.session_pane.history.string()
         assert '测试用户' in c.session_pane.history.string()
         assert '这是一条我的消息' in c.session_pane.history.string()
+        assert c.session_pane.new_button.title() == '新建 Session'
+        assert c.session_pane.refresh_timer.isValid()
+        store.append_messages(
+            first_session.id,
+            [MessageInput('them', '测试用户', '实时追加的消息')])
+        c.session_pane.pollForUpdates_(None)
+        assert '消息记录（3 条）' in c.session_pane.history.string()
+        assert '实时追加的消息' in c.session_pane.history.string()
         A.NSRunLoop.currentRunLoop().runUntilDate_(
             NSDate.dateWithTimeIntervalSinceNow_(0.1))
         render_window(c, '/tmp/jev-settings-sessions.png')
@@ -118,6 +126,7 @@ try:
         c.show('sessions')
         assert c.window.isVisible(), 'closed settings window should be reusable'
         c.select_mode('models')
+        assert c.session_pane.refresh_timer is None
         for index, name in enumerate(('jev', 'openai', 'anthropic')):
             c.tabs.selectTabViewItemAtIndex_(index)
             A.NSRunLoop.currentRunLoop().runUntilDate_(
@@ -138,6 +147,9 @@ try:
         assert shell.fields['OPENAI']['API_KEY'].stringValue() == ''
         reopened.window.close()
         shell.window.close()
+        reopened.close_resources()
+        shell.close_resources()
+        c.close_resources()
         store.close()
         c.session_pane.refresh()
         assert '暂不可用' in c.session_pane.status.stringValue()

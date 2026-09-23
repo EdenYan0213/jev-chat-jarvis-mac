@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
+from conversation_store import normalize_chat_key
 from perception import TextBlock, extract_messages
 
 
@@ -26,14 +27,16 @@ def hud_harness():
              '_prejudge_loop', '_pregen_loop', '_observe_snapshot',
              '_managed_context', '_disable_persistence',
              '_select_session', '_reset_for_session_change',
-             '_create_session'}
+             '_create_session', 'applyChat_'}
     methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
     for method in methods:
         method.decorator_list = []
     klass = ast.ClassDef(name='Harness', bases=[], keywords=[], body=methods, decorator_list=[])
     scope = {'fill': SimpleNamespace(locate_input=Mock(return_value={'box': None, 'rect': None, 'reason': 'test'})), 'time': time, 'threading': threading, '_log': lambda *_: None,
              'screen_capture_ok': lambda: True, 'read_conversation': Mock(),
-             'PALETTE': {'muted': None}, 'CONTEXT_TURNS': 8, 'JUDGE_TURNS': 4,
+             'normalize_chat_key': normalize_chat_key,
+             'PALETTE': {'muted': None, 'accent': None},
+             'CONTEXT_TURNS': 8, 'JUDGE_TURNS': 4,
              'SLOW_TICK': 1, 'BURST_TICK': .45, 'FAST_TICK': .25, 'BURST_READS': 3,
              'SETTLE_S': 1.2, 'STABLE_READS': 3, 'EARLY_SETTLE_S': .7, 'MIN_GAP_S': 2}
     module = ast.fix_missing_locations(ast.Module(body=[klass], type_ignores=[]))
@@ -370,6 +373,18 @@ class OutgoingTests(unittest.TestCase):
         self.assertEqual(self.h._reply_epoch, old_epoch + 1)
         self.assertIsNone(self.h._last_full)
         self.assertEqual(self.h._next_read_ts, 0.0)
+
+    def test_empty_detected_chat_still_exposes_unnamed_session(self):
+        self.h.rows["chat"] = Mock()
+        self.h._refresh_session_popup = Mock()
+
+        Harness.applyChat_(self.h, "")
+
+        self.assertEqual(self.h._chat_title, "未命名聊天")
+        self.h._render.assert_called_once_with(
+            "chat", "未命名聊天", None)
+        self.h._refresh_session_popup.assert_called_once_with(
+            "未命名聊天")
 
     def test_session_switch_waits_for_inflight_read_to_finish(self):
         entered = threading.Event()

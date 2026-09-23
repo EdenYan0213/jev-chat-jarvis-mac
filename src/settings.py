@@ -249,8 +249,10 @@ class SettingsController(NSObject):
         self.mode_control.setSelectedSegment_(1 if sessions else 0)
         if sessions:
             self.session_pane.refresh()
+            self.session_pane.start_auto_refresh()
             self.window.setTitle_("会话管理 · 数据仅保存在本机")
         else:
+            self.session_pane.stop_auto_refresh()
             self.window.setTitle_("模型设置 · 保存后重启生效")
 
     def modeChanged_(self, sender):
@@ -261,11 +263,14 @@ class SettingsController(NSObject):
     def show(self, mode=None):
         if mode is not None:
             self.select_mode(mode)
+        elif self.mode_control.selectedSegment() == 1:
+            self.session_pane.start_auto_refresh()
         self.window.makeKeyAndOrderFront_(None)
         A.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
 
     @objc.python_method
     def close_resources(self):
+        self.session_pane.stop_auto_refresh()
         if self.owns_session_store and self.session_store is not None:
             self.session_store.close()
             self.session_store = None
@@ -395,6 +400,9 @@ class SettingsController(NSObject):
             alert.addButtonWithTitle_("放弃修改")
             return alert.runModal() == A.NSAlertSecondButtonReturn
         return True
+
+    def windowWillClose_(self, notification):
+        self.session_pane.stop_auto_refresh()
 
 
 if __name__ == "__main__":

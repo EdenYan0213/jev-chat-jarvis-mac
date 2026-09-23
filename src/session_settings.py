@@ -9,7 +9,7 @@ from typing import Callable
 
 import AppKit as A
 import objc
-from Foundation import NSIndexSet, NSObject, NSMakeRect
+from Foundation import NSIndexSet, NSObject, NSMakeRect, NSTimer
 
 from conversation_store import ConversationStore, SessionRecord, StoredMessage
 import ui_style
@@ -104,6 +104,12 @@ class SessionManagerModel:
             messages=tuple(self.store.list_messages(session_id)),
         )
 
+    def change_token(self) -> tuple:
+        return self.store.change_token()
+
+    def create(self, chat_key: str, name: str | None = None) -> SessionRow:
+        return self._row(self.store.create_session(chat_key, name))
+
     def rename(self, session_id: str, name: str) -> SessionRow:
         return self._row(self.store.rename_session(session_id, name))
 
@@ -133,6 +139,9 @@ class SessionManagerPane(NSObject):
         self.operation_lock = operation_lock or threading.RLock()
         self.showing_trash = False
         self.rows: list[SessionRow] = []
+        self.refresh_timer = None
+        self._last_change_token = None
+        self._refreshing = False
 
         frame = frame or NSMakeRect(0, 0, 760, 596)
         self.view = A.NSView.alloc().initWithFrame_(frame)
@@ -143,7 +152,7 @@ class SessionManagerPane(NSObject):
             "会话管理", 24, 548, 300, 28, 22, PALETTE["text"], True)
         title.setAccessibilityRoleDescription_("会话管理")
         self._label(
-            "显示所有聊天的 Session 和双方消息；回收站内容会在 30 天后自动清理。",
+            "显示所有聊天的 Session 和双方消息，消息会自动更新；回收站内容 30 天后清理。",
             24, 522, 620, 20, 11, PALETTE["muted"])
 
         self.search = A.NSSearchField.alloc().initWithFrame_(
@@ -223,16 +232,18 @@ class SessionManagerPane(NSObject):
         history_scroll.setBorderType_(A.NSBezelBorder)
         self.view.addSubview_(history_scroll)
 
+        self.new_button = self._button(
+            "新建 Session", "createSelected:", 24, 54, 112)
         self.rename_button = self._button(
-            "重命名", "renameSelected:", 24, 54, 112)
+            "重命名", "renameSelected:", 146, 54, 96)
         self.trash_button = self._button(
-            "移到回收站", "trashSelected:", 146, 54, 128)
+            "移到回收站", "trashSelected:", 252, 54, 118)
         self.restore_button = self._button(
             "恢复", "restoreSelected:", 24, 54, 112)
         self.delete_button = self._button(
             "永久删除", "deleteSelected:", 146, 54, 128)
         self.status = self._label(
-            "", 294, 50, 442, 40, 11, PALETTE["muted"])
+            "", 388, 50, 348, 40, 11, PALETTE["muted"])
         self.status.cell().setWraps_(True)
         self.refresh()
         return self
@@ -288,7 +299,7 @@ class SessionManagerPane(NSObject):
         try:
             with self.operation_lock:
                 row, active_changed = operation()
-                self.refresh()
+                self.refresh(preferred_id=row.id if row is not None else None)
                 if row is not None:
                     self._notify(row.chat_key, active_changed)
         except sqlite3.Error:
@@ -301,9 +312,19 @@ class SessionManagerPane(NSObject):
         self._set_status(success)
 
     @objc.python_method
-    def refresh(self):
+    def refresh(self, preferred_id: str | None = None,
+                follow_latest: bool = False):
         selected = self._selected()
-        selected_id = selected.id if selected is not None else None
+        selected_id = (
+            preferred_id
+            if preferred_id is not None
+            else selected.id if selected is not None else None
+        )
+        previous_count = (
+            selected.message_count
+            if selected is not None and selected.id == selected_id
+            else None
+        )
         search = self.search.stringValue() if hasattr(self, "search") else ""
         try:
             self.rows = (
@@ -315,36 +336,81 @@ class SessionManagerPane(NSObject):
             if hasattr(self, "status"):
                 self._set_status(
                     "会话数据库暂不可用，请重新打开应用。", True)
-        self.table.reloadData()
-        if self.rows:
-            index = next(
-                (i for i, row in enumerate(self.rows)
-                 if row.id == selected_id),
-                0,
-            )
-            self.table.selectRowIndexes_byExtendingSelection_(
-                NSIndexSet.indexSetWithIndex_(index), False)
-            self.table.scrollRowToVisible_(index)
-            self._show_detail(self.rows[index])
-        else:
-            self.table.deselectAll_(None)
-            self._clear_detail(
-                "回收站中没有 Session。"
-                if self.showing_trash else
-                "没有匹配的 Session。")
+        self._refreshing = True
+        try:
+            self.table.reloadData()
+            if self.rows:
+                index = next(
+                    (i for i, row in enumerate(self.rows)
+                     if row.id == selected_id),
+                    0,
+                )
+                row = self.rows[index]
+                self.table.selectRowIndexes_byExtendingSelection_(
+                    NSIndexSet.indexSetWithIndex_(index), False)
+                self.table.scrollRowToVisible_(index)
+                show_latest = bool(
+                    follow_latest
+                    and previous_count is not None
+                    and row.id == selected_id
+                    and row.message_count > previous_count
+                )
+                self._show_detail(row, follow_latest=show_latest)
+            else:
+                self.table.deselectAll_(None)
+                self._clear_detail(
+                    "回收站中没有 Session。"
+                    if self.showing_trash else
+                    "没有匹配的 Session。")
+        finally:
+            self._refreshing = False
         self.rename_button.setHidden_(self.showing_trash)
         self.trash_button.setHidden_(self.showing_trash)
+        self.new_button.setHidden_(self.showing_trash)
         self.restore_button.setHidden_(not self.showing_trash)
         self.delete_button.setHidden_(not self.showing_trash)
         self._update_buttons()
+        try:
+            self._last_change_token = self.model.change_token()
+        except sqlite3.Error:
+            self._last_change_token = None
 
     @objc.python_method
     def _update_buttons(self):
         selected = self._selected() is not None
-        for button in (
-                self.rename_button, self.trash_button,
-                self.restore_button, self.delete_button):
-            button.setEnabled_(selected)
+        self.new_button.setEnabled_(selected and not self.showing_trash)
+        self.rename_button.setEnabled_(selected and not self.showing_trash)
+        self.trash_button.setEnabled_(selected and not self.showing_trash)
+        self.restore_button.setEnabled_(selected and self.showing_trash)
+        self.delete_button.setEnabled_(selected and self.showing_trash)
+
+    @objc.python_method
+    def start_auto_refresh(self):
+        timer = self.refresh_timer
+        if timer is not None and timer.isValid():
+            return
+        self.refresh_timer = (
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.5, self, "pollForUpdates:", None, True))
+
+    @objc.python_method
+    def stop_auto_refresh(self):
+        timer = self.refresh_timer
+        if timer is not None:
+            timer.invalidate()
+        self.refresh_timer = None
+
+    def pollForUpdates_(self, timer):
+        if self.view.isHidden():
+            return
+        try:
+            token = self.model.change_token()
+        except sqlite3.Error:
+            self._set_status(
+                "会话数据库暂不可用，请重新打开应用。", True)
+            return
+        if token != self._last_change_token:
+            self.refresh(follow_latest=True)
 
     @objc.python_method
     def _clear_detail(self, message: str):
@@ -377,7 +443,7 @@ class SessionManagerPane(NSObject):
         return "\n".join(parts)
 
     @objc.python_method
-    def _show_detail(self, row: SessionRow):
+    def _show_detail(self, row: SessionRow, follow_latest: bool = False):
         try:
             detail = self.model.detail(row.id)
         except sqlite3.Error:
@@ -399,7 +465,10 @@ class SessionManagerPane(NSObject):
             f"聊天：{detail.row.chat_key}\n"
             f"{detail.row.message_count} 条消息 · {updated} 更新 · {state}")
         self.history.setString_(self._history_text(detail))
-        self.history.scrollToBeginningOfDocument_(None)
+        if follow_latest:
+            self.history.scrollToEndOfDocument_(None)
+        else:
+            self.history.scrollToBeginningOfDocument_(None)
 
     def numberOfRowsInTableView_(self, table):
         return len(self.rows)
@@ -423,6 +492,8 @@ class SessionManagerPane(NSObject):
 
     def tableViewSelectionDidChange_(self, notification):
         self._update_buttons()
+        if self._refreshing:
+            return
         row = self._selected()
         if row is not None:
             self._show_detail(row)
@@ -434,6 +505,28 @@ class SessionManagerPane(NSObject):
         self.showing_trash = sender.selectedSegment() == 1
         self.refresh()
         self._set_status("")
+
+    def createSelected_(self, sender):
+        row = self._selected()
+        if row is None or self.showing_trash:
+            return
+        field = A.NSTextField.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 320, 26))
+        field.setPlaceholderString_("名称可留空，应用会自动命名")
+        alert = A.NSAlert.alloc().init()
+        alert.setMessageText_(f"在「{row.chat_key}」中新建 Session")
+        alert.setInformativeText_(
+            "新 Session 会立即成为这个聊天正在使用的会话。")
+        alert.setAccessoryView_(field)
+        alert.addButtonWithTitle_("新建")
+        alert.addButtonWithTitle_("取消")
+        if alert.runModal() != A.NSAlertFirstButtonReturn:
+            return
+        name = field.stringValue().strip() or None
+        self._run(
+            lambda: (self.model.create(row.chat_key, name), True),
+            f"已在「{row.chat_key}」中新建 Session。",
+        )
 
     def renameSelected_(self, sender):
         row = self._selected()

@@ -74,7 +74,7 @@ from generate import (BUILTIN_SOURCE, Generator, generation_enabled,
                       load_credentials)  # noqa: E402
 from conversation_context import (  # noqa: E402
     ContextBuilder, ConversationTracker, SummaryWorker)
-from conversation_store import ConversationStore  # noqa: E402
+from conversation_store import ConversationStore, normalize_chat_key  # noqa: E402
 from emotions import format_emotion  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
@@ -2014,10 +2014,11 @@ class HudController(NSObject):
 
     # --- main-thread callbacks (AppKit is not thread safe)
     def applyChat_(self, title):
-        self._chat_title = title
-        self._render("chat", title, PALETTE["accent"])
-        self.rows["chat"].setToolTip_(title)
-        self._refresh_session_popup(title)
+        chat_key = normalize_chat_key(title)
+        self._chat_title = chat_key
+        self._render("chat", chat_key, PALETTE["accent"])
+        self.rows["chat"].setToolTip_(chat_key)
+        self._refresh_session_popup(chat_key)
 
     def applyIncoming_(self, payload):
         # a new message landed but we are not analysing yet (burst in progress):

@@ -282,6 +282,41 @@ class ConversationStore:
                 for row in self._db.execute(query, params).fetchall()
             ]
 
+    def change_token(self) -> tuple:
+        """Return a lightweight snapshot for UI change detection."""
+        with self._lock:
+            sessions = tuple(
+                tuple(row)
+                for row in self._db.execute(
+                    """SELECT
+                           s.id,
+                           s.chat_key,
+                           s.name,
+                           s.updated_at,
+                           s.last_active_at,
+                           s.deleted_at,
+                           s.summary_text,
+                           s.summary_until_message_id,
+                           s.summary_version,
+                           s.has_observation_gap,
+                           count(m.id) AS message_count,
+                           coalesce(max(m.id), 0) AS newest_message_id
+                         FROM sessions s
+                         LEFT JOIN messages m ON m.session_id = s.id
+                        GROUP BY s.id
+                        ORDER BY s.id"""
+                ).fetchall()
+            )
+            bindings = tuple(
+                tuple(row)
+                for row in self._db.execute(
+                    """SELECT chat_key, active_session_id, updated_at
+                         FROM chat_bindings
+                        ORDER BY chat_key"""
+                ).fetchall()
+            )
+        return sessions, bindings
+
     def set_active_session(self, chat_title: str,
                            session_id: str) -> SessionRecord:
         chat_key = normalize_chat_key(chat_title)
