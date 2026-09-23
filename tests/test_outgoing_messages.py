@@ -23,7 +23,8 @@ def hud_harness():
     names = {'_work_inner', '_push', '_reply_task', '_reply_current', '_push_reply',
              'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
              '_take_pregen', '_gen_with_pregen', '_finish_generate',
-             '_prejudge_loop', '_pregen_loop'}
+             '_prejudge_loop', '_pregen_loop', '_observe_snapshot',
+             '_managed_context', '_disable_persistence'}
     methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
     for method in methods:
         method.decorator_list = []
@@ -58,6 +59,10 @@ class OutgoingTests(unittest.TestCase):
             _stable_n=0, last_change_ts=0, last_analyze_ts=0,
             _prejudge_event=threading.Event(), _pregen_event=threading.Event(),
             slot_tones=['normal'], _stream_rows={}, _last_context=None,
+            session_store=None, conversation_tracker=None,
+            context_builder=None, summary_worker=None,
+            _last_observation=None, _last_purge_ts=time.time(),
+            _storage_warning_shown=False,
         ).items():
             setattr(h, name, value)
         h._show = Mock()
@@ -72,7 +77,8 @@ class OutgoingTests(unittest.TestCase):
         h._judged_once = True
         for name in ['applyIncoming_', 'applyPending_', 'applyJudgment_',
                      'applyCandidates_', 'applyStreamLine_', 'applyError_',
-                     'applyPosition_', 'applyChat_', 'applyBoxes_']:
+                     'applyPosition_', 'applyChat_', 'applyBoxes_',
+                     'applyStorageWarning_']:
             setattr(h, name, Mock())
         self.queue = []
         h.performSelectorOnMainThread_withObject_waitUntilDone_ = lambda s, p, w: self.queue.append((s, p))
@@ -85,6 +91,13 @@ class OutgoingTests(unittest.TestCase):
         }
         self.h._work_inner()
         return messages
+
+    def read_unchanged(self):
+        HUD['read_conversation'].return_value = {
+            'ok': True, 'unchanged': True, 'fingerprint': None,
+            'window': {'wid': 1},
+        }
+        self.h._work_inner()
 
     def flush(self):
         while self.queue:
@@ -145,6 +158,70 @@ class OutgoingTests(unittest.TestCase):
         self.assertIn('我: 我会带材料', self.h._prejudge_req[1])
         self.flush()
         self.h.applyIncoming_.assert_called_once()
+
+    def test_fresh_snapshot_persists_both_sides_and_shares_managed_context(self):
+        session = SimpleNamespace(id="session-1", chat_key="chat")
+        observation = SimpleNamespace(
+            session=session, visible_ids=(101, 102), appended=(),
+            gap_detected=False)
+        self.h.conversation_tracker = Mock()
+        self.h.conversation_tracker.observe.return_value = observation
+        self.h.context_builder = Mock()
+        self.h.context_builder.build.return_value = SimpleNamespace(
+            text="managed session context")
+        self.h.summary_worker = Mock()
+
+        messages = self.read([
+            block('下午开会', .40, .70, .15),
+            block('我会带材料', .78, .50, .10),
+        ])
+
+        observed_messages = (
+            self.h.conversation_tracker.observe.call_args.args[1])
+        self.assertEqual(
+            [message.side for message in observed_messages], ["them", "me"])
+        self.h.context_builder.build.assert_called_once_with(
+            "session-1", exclude_message_id=101)
+        self.assertEqual(
+            self.h._prejudge_req[1], "managed session context")
+        self.assertEqual(
+            self.h._pregen_req[1], "managed session context")
+        self.h.summary_worker.schedule.assert_called_once_with("session-1")
+        self.assertEqual(len(messages), 2)
+
+    def test_unchanged_frame_does_not_persist_snapshot_twice(self):
+        observation = SimpleNamespace(
+            session=SimpleNamespace(id="session-1", chat_key="chat"),
+            visible_ids=(101,), appended=(), gap_detected=False)
+        self.h.conversation_tracker = Mock()
+        self.h.conversation_tracker.observe.return_value = observation
+        self.h.context_builder = Mock()
+        self.h.context_builder.build.return_value = SimpleNamespace(text="ctx")
+        self.h.summary_worker = Mock()
+
+        self.incoming()
+        self.read_unchanged()
+
+        self.h.conversation_tracker.observe.assert_called_once()
+        self.h.summary_worker.schedule.assert_called_once()
+
+    def test_persistence_failure_falls_back_without_stopping_analysis(self):
+        self.h.conversation_tracker = Mock()
+        self.h.conversation_tracker.observe.side_effect = OSError("disk")
+        self.h.context_builder = Mock()
+        self.h.summary_worker = Mock()
+
+        self.read([
+            block('下午开会', .40, .70, .15),
+            block('我会带材料', .78, .50, .10),
+        ])
+        self.flush()
+
+        self.assertIn('我: 我会带材料', self.h._prejudge_req[1])
+        self.assertEqual(self.h._prejudge_req[1], self.h._pregen_req[1])
+        self.h.applyStorageWarning_.assert_called_once()
+        self.assertIsNone(self.h.conversation_tracker)
+        self.assertIsNone(self.h.context_builder)
 
     def test_incoming_wrapped_message_and_sender_preserved(self):
         messages = extract_messages([block('小王', .40, .80, .05, .020),
