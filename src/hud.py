@@ -288,6 +288,7 @@ class HudController(NSObject):
             "1", "true", "yes", "on")
         self._last_risk = 0.0         # newest verdict's risk, for the overlay's highlight
         self._chat_title = ""
+        self._session_menu_refreshing = False
         self._asked_permission = False
         self._win_wid = None          # sticky WeChat window id
         self._last_origin = None      # last applied panel origin
@@ -400,7 +401,7 @@ class HudController(NSObject):
             self._detail_views.append(label)
 
         for key, x, top, w, h, size, color, bold in (
-            ("chat", 20, 14, PANEL_W - 76, 20, 15, PALETTE["accent"], True),
+            ("chat", 20, 14, 126, 20, 15, PALETTE["accent"], True),
             ("status", 20, 36, PANEL_W - 40, 14, 10, PALETTE["muted"], False),
             ("message", 26, 62, PANEL_W - 52, 30, 14, PALETTE["text"], False),
             ("sender", 26, 96, PANEL_W - 52, 14, 10, PALETTE["muted"], False),
@@ -418,6 +419,18 @@ class HudController(NSObject):
             self._fixed.append((tf, x, top, w, h))
             if key not in {"chat", "status"}:
                 self._detail_views.append(tf)
+
+        self.session_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(0, 0, 156, 24), False)
+        self.session_popup.setFont_(NSFont.systemFontOfSize_(10))
+        self.session_popup.setControlSize_(AppKit.NSControlSizeSmall)
+        self.session_popup.setToolTip_("切换、新建或管理当前聊天的 Session")
+        self.session_popup.setAccessibilityLabel_("当前 Session")
+        self.session_popup.setTarget_(self)
+        self.session_popup.setAction_("sessionChanged:")
+        self.session_popup.setHidden_(self.session_store is None)
+        view.addSubview_(self.session_popup)
+        self._fixed.append((self.session_popup, 150, 9, 156, 24))
 
         header = self._make_label(18, 0, PANEL_W - 36, 18,
                                   size=12, color=PALETTE["text"], bold=True)
@@ -636,6 +649,7 @@ class HudController(NSObject):
             ("YOLO 检测框", "toggleBoxes:", ""),
             ("立即重新分析", "reanalyze:", ""),
             ("模型设置…", "openSettings:", ","),
+            ("会话管理…", "openSessionManager:", ""),
         ):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
@@ -649,18 +663,29 @@ class HudController(NSObject):
             AppKit.NSOnState if self._show_boxes else AppKit.NSOffState)
         self.status_item.setMenu_(menu)
 
-    def openSettings_(self, sender):
+    @objc.python_method
+    def _open_settings(self, mode: str):
         from settings import SettingsController
         if getattr(self, "settings_controller", None) and self.settings_controller.window.isVisible():
-            self.settings_controller.show()
+            self.settings_controller.show(mode)
             return
         try:
-            self.settings_controller = SettingsController.alloc().init().build()
-            self.settings_controller.show()
+            self.settings_controller = SettingsController.alloc().init().build(
+                session_store=self.session_store,
+                initial_mode=mode,
+                on_session_change=self._settings_session_changed,
+            )
+            self.settings_controller.show(mode)
         except OSError:
             alert = AppKit.NSAlert.alloc().init()
             alert.setMessageText_("无法读取配置文件，请检查文件权限。")
             alert.runModal()
+
+    def openSettings_(self, sender):
+        self._open_settings("models")
+
+    def openSessionManager_(self, sender):
+        self._open_settings("sessions")
 
     @objc.python_method
     def _make_surface(self, radius: float, color: NSColor,
@@ -1126,6 +1151,133 @@ class HudController(NSObject):
         self.last_seen = None
         self.analyzed_text = None
         self._render("status", "重新分析中…", PALETTE["muted"])
+
+    @objc.python_method
+    def _reset_for_session_change(self):
+        """Invalidate every result tied to the previously active Session."""
+        self._reply_epoch += 1
+        self._reply_key = None
+        self.last_seen = None
+        self.analyzed_text = None
+        self._prejudge_req = None
+        self._prejudge_result = None
+        self._pregen_req = None
+        self._pregen_result = None
+        self._gen_epoch += 1
+        self._fingerprint = None
+        self._last_full = None
+        self._last_observation = None
+        self._stable_n = 0
+        self._burst_left = BURST_READS
+        self._last_skip_reason = None
+        self._next_read_ts = 0.0
+
+    @objc.python_method
+    def _select_session(self, session_id: str):
+        store = getattr(self, "session_store", None)
+        chat_title = getattr(self, "_chat_title", "")
+        if store is None:
+            raise RuntimeError("session storage is unavailable")
+        if not chat_title:
+            raise ValueError("no active chat")
+        session = store.set_active_session(chat_title, session_id)
+        self._reset_for_session_change()
+        return session
+
+    @objc.python_method
+    def _refresh_session_popup(self, chat_title: str | None = None):
+        popup = getattr(self, "session_popup", None)
+        store = getattr(self, "session_store", None)
+        title = chat_title if chat_title is not None else self._chat_title
+        if popup is None:
+            return
+        if store is None or not title:
+            popup.setHidden_(True)
+            return
+        try:
+            active = store.active_session(title)
+            if active is None:
+                active = store.resolve_session(title)
+            sessions = sorted(
+                store.list_sessions(title),
+                key=lambda session: (
+                    session.last_active_at, session.updated_at, session.id),
+                reverse=True,
+            )
+        except Exception as exc:
+            self._disable_persistence(exc)
+            popup.setHidden_(True)
+            return
+
+        self._session_menu_refreshing = True
+        try:
+            popup.removeAllItems()
+            selected_index = 0
+            for index, session in enumerate(sessions):
+                popup.addItemWithTitle_(session.name)
+                popup.lastItem().setRepresentedObject_(session.id)
+                if active is not None and session.id == active.id:
+                    selected_index = index
+            popup.menu().addItem_(AppKit.NSMenuItem.separatorItem())
+            for label, action in (
+                    ("新建 Session…", "__new__"),
+                    ("管理 Session…", "__manage__")):
+                popup.addItemWithTitle_(label)
+                popup.lastItem().setRepresentedObject_(action)
+            if sessions:
+                popup.selectItemAtIndex_(selected_index)
+            popup.setHidden_(False)
+        finally:
+            self._session_menu_refreshing = False
+
+    @objc.python_method
+    def _create_session(self):
+        store = getattr(self, "session_store", None)
+        chat_title = getattr(self, "_chat_title", "")
+        if store is None:
+            raise RuntimeError("session storage is unavailable")
+        if not chat_title:
+            raise ValueError("no active chat")
+        snapshot = getattr(self, "_last_full", None)
+        session = store.create_session(chat_title)
+        tracker = getattr(self, "conversation_tracker", None)
+        if tracker is not None and snapshot is not None:
+            observation = tracker.observe(
+                chat_title, snapshot.get("messages") or [])
+            worker = getattr(self, "summary_worker", None)
+            if worker is not None:
+                worker.schedule(observation.session.id)
+        self._reset_for_session_change()
+        return session
+
+    @objc.python_method
+    def _settings_session_changed(self, chat_key: str,
+                                  active_changed: bool):
+        if chat_key != getattr(self, "_chat_title", ""):
+            return
+        if active_changed:
+            self._reset_for_session_change()
+            self.applyWaiting_(None)
+        self._refresh_session_popup()
+
+    def sessionChanged_(self, sender):
+        if self._session_menu_refreshing:
+            return
+        item = sender.selectedItem()
+        action = item.representedObject() if item is not None else None
+        try:
+            if action == "__new__":
+                self._create_session()
+                self.applyWaiting_(None)
+            elif action == "__manage__":
+                self._open_settings("sessions")
+            elif action:
+                self._select_session(str(action))
+                self.applyWaiting_(None)
+        except (KeyError, ValueError, RuntimeError, OSError) as exc:
+            self._render("status", f"Session 操作失败 · {type(exc).__name__}",
+                         PALETTE["red"])
+        self._refresh_session_popup()
 
     def quitApp_(self, sender):
         worker = getattr(self, "summary_worker", None)
@@ -1779,6 +1931,8 @@ class HudController(NSObject):
     def applyChat_(self, title):
         self._chat_title = title
         self._render("chat", title, PALETTE["accent"])
+        self.rows["chat"].setToolTip_(title)
+        self._refresh_session_popup(title)
 
     def applyIncoming_(self, payload):
         # a new message landed but we are not analysing yet (burst in progress):

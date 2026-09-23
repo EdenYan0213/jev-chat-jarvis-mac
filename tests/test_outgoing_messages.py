@@ -24,7 +24,9 @@ def hud_harness():
              'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
              '_take_pregen', '_gen_with_pregen', '_finish_generate',
              '_prejudge_loop', '_pregen_loop', '_observe_snapshot',
-             '_managed_context', '_disable_persistence'}
+             '_managed_context', '_disable_persistence',
+             '_select_session', '_reset_for_session_change',
+             '_create_session'}
     methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
     for method in methods:
         method.decorator_list = []
@@ -285,6 +287,59 @@ class OutgoingTests(unittest.TestCase):
         epoch = self.h._reply_epoch
         self.read([block('下午开会', .40, .70, .15)], title='another chat')
         self.assertGreater(self.h._reply_epoch, epoch)
+
+    def test_switching_session_invalidates_inflight_results_and_forces_read(self):
+        self.h._chat_title = "chat"
+        self.h.session_store = Mock()
+        self.h.session_store.set_active_session.return_value = SimpleNamespace(
+            id="session-2", chat_key="chat", name="Second")
+        self.h._reply_key = ("chat", "session-1", "下午开会")
+        self.h._prejudge_req = ("old",)
+        self.h._prejudge_result = ("old",)
+        self.h._pregen_req = ("old",)
+        self.h._pregen_result = ("old",)
+        self.h._fingerprint = "old"
+        self.h._last_full = {"messages": []}
+        old_epoch = self.h._reply_epoch
+
+        selected = self.h._select_session("session-2")
+
+        self.assertEqual(selected.id, "session-2")
+        self.assertEqual(self.h._reply_epoch, old_epoch + 1)
+        self.assertIsNone(self.h._reply_key)
+        self.assertIsNone(self.h._prejudge_req)
+        self.assertIsNone(self.h._prejudge_result)
+        self.assertIsNone(self.h._pregen_req)
+        self.assertIsNone(self.h._pregen_result)
+        self.assertIsNone(self.h._fingerprint)
+        self.assertIsNone(self.h._last_full)
+        self.assertIsNone(self.h._last_observation)
+        self.assertEqual(self.h._next_read_ts, 0.0)
+
+    def test_new_session_seeds_current_visible_snapshot_before_forcing_read(self):
+        self.h._chat_title = "chat"
+        self.h.session_store = Mock()
+        created = SimpleNamespace(
+            id="session-2", chat_key="chat", name="chat · 2026-09-23")
+        self.h.session_store.create_session.return_value = created
+        self.h.conversation_tracker = Mock()
+        observation = SimpleNamespace(session=created)
+        self.h.conversation_tracker.observe.return_value = observation
+        self.h.summary_worker = Mock()
+        visible = [SimpleNamespace(side="them", text="hello")]
+        self.h._last_full = {"messages": visible}
+        old_epoch = self.h._reply_epoch
+
+        result = self.h._create_session()
+
+        self.assertIs(result, created)
+        self.h.session_store.create_session.assert_called_once_with("chat")
+        self.h.conversation_tracker.observe.assert_called_once_with(
+            "chat", visible)
+        self.h.summary_worker.schedule.assert_called_once_with("session-2")
+        self.assertEqual(self.h._reply_epoch, old_epoch + 1)
+        self.assertIsNone(self.h._last_full)
+        self.assertEqual(self.h._next_read_ts, 0.0)
 
     def test_prejudge_completion_cannot_repopulate_cleared_state(self):
         self.incoming()

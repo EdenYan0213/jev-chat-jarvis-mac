@@ -10,6 +10,8 @@ import objc
 from Foundation import NSObject, NSMakeRect
 
 import builtin
+from conversation_store import ConversationStore
+from session_settings import SessionManagerPane
 import userconfig
 import settings_config as config
 import ui_style
@@ -20,7 +22,8 @@ PALETTE = ui_style.PALETTE
 
 class SettingsController(NSObject):
     @objc.python_method
-    def build(self):
+    def build(self, session_store=None, initial_mode="models",
+              on_session_change=None):
         self.path = userconfig.env_files()[0]
         self.original = config.read_document(self.path)
         values = userconfig.parse_env_file(self.path)
@@ -30,7 +33,7 @@ class SettingsController(NSObject):
         self.controls = []
         self.busy = False
         self.window = A.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 760, 600),
+            NSMakeRect(0, 0, 760, 640),
             A.NSWindowStyleMaskTitled | A.NSWindowStyleMaskClosable,
             A.NSBackingStoreBuffered, False)
         self.window.setAppearance_(A.NSAppearance.appearanceNamed_(A.NSAppearanceNameAqua))
@@ -42,7 +45,7 @@ class SettingsController(NSObject):
         self.window.setLevel_(A.NSFloatingWindowLevel + 1)
         self.window.setReleasedWhenClosed_(False)
         self.window.setDelegate_(self)
-        view = A.NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 760, 600))
+        view = A.NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 760, 640))
         view.setMaterial_(getattr(
             A, "NSVisualEffectMaterialSidebar",
             getattr(A, "NSVisualEffectMaterialLight", 1)))
@@ -132,6 +135,28 @@ class SettingsController(NSObject):
         self.set_status(self.status.stringValue())
         self.save_button = self.button(view, "保存配置", "saveSettings:", 602, 29, 132, True)
         self.controls.append(self.save_button)
+
+        self.model_views = list(view.subviews())
+        self.session_store = session_store or ConversationStore()
+        self.owns_session_store = session_store is None
+        self.session_pane = SessionManagerPane.alloc().init().build(
+            self.session_store,
+            NSMakeRect(0, 0, 760, 596),
+            on_change=on_session_change,
+        )
+        self.session_pane.view.setHidden_(True)
+        view.addSubview_(self.session_pane.view)
+
+        self.mode_control = A.NSSegmentedControl.alloc().initWithFrame_(
+            NSMakeRect(250, 605, 260, 28))
+        self.mode_control.setSegmentCount_(2)
+        self.mode_control.setLabel_forSegment_("模型设置", 0)
+        self.mode_control.setLabel_forSegment_("会话管理", 1)
+        self.mode_control.setSelectedSegment_(0)
+        self.mode_control.setTarget_(self)
+        self.mode_control.setAction_("modeChanged:")
+        view.addSubview_(self.mode_control)
+        self.select_mode(initial_mode)
         self.window.center()
         return self
 
@@ -213,7 +238,27 @@ class SettingsController(NSObject):
         return button
 
     @objc.python_method
-    def show(self):
+    @objc.python_method
+    def select_mode(self, mode):
+        sessions = mode in ("sessions", "session", "会话管理")
+        for child in self.model_views:
+            child.setHidden_(sessions)
+        self.session_pane.view.setHidden_(not sessions)
+        self.mode_control.setSelectedSegment_(1 if sessions else 0)
+        if sessions:
+            self.session_pane.refresh()
+            self.window.setTitle_("会话管理 · 数据仅保存在本机")
+        else:
+            self.window.setTitle_("模型设置 · 保存后重启生效")
+
+    def modeChanged_(self, sender):
+        self.select_mode(
+            "sessions" if sender.selectedSegment() == 1 else "models")
+
+    @objc.python_method
+    def show(self, mode=None):
+        if mode is not None:
+            self.select_mode(mode)
         self.window.makeKeyAndOrderFront_(None)
         A.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
 
