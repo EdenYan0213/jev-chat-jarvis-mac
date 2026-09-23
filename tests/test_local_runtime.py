@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import builtin
 import generate
+import styles
 from judge_jev import JevJudge
 
 
@@ -29,6 +30,16 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertEqual(
             result, {"groups": [], "disabled": True, "elapsed_s": 0.0})
         load.assert_not_called()
+
+    def test_warm_sunshine_tone_is_available_and_its_label_is_stripped(self):
+        self.assertIn("暖心阳光男孩", styles.BUILTIN)
+        prompt = styles.BUILTIN["暖心阳光男孩"]
+        self.assertIn("接住情绪", prompt)
+        self.assertIn("不油腻", prompt)
+        self.assertEqual(
+            styles.strip_label("暖心阳光男孩：我在，慢慢说"),
+            "我在，慢慢说",
+        )
 
     def test_hud_local_generator_allows_cold_start(self):
         tree = ast.parse((ROOT / "src" / "hud.py").read_text())
