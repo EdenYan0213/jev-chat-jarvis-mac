@@ -1,54 +1,25 @@
-"""Offline regressions for #11 and #14. Run: python -B -m unittest discover -s tests -v.
+"""HUD reply-pipeline regressions: reply epochs/keys, incoming gating, prejudge and
+pregen slots, and foreground/read-failure handling. Run: python -B -m unittest
+discover -s tests -v.
 
-Load the actual HUD methods through AST so the tests never start Cocoa, read the
-screen, load user credentials, or make model calls. Perception uses synthetic OCR.
+Loads the actual HudController methods through AST (see tests/support_hud.py) so the
+tests never start Cocoa, read the screen, load user credentials, or make model calls.
 """
-import ast
 import sys
 import threading
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
-from perception import TextBlock, extract_chat_title, extract_messages, find_wechat_window
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/: for support_hud
+from perception import extract_chat_title, extract_messages, find_wechat_window
+from support_hud import Harness, HUD, block
 
 
-def hud_harness():
-    tree = ast.parse((ROOT / 'src/hud.py').read_text())
-    source = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'HudController')
-    names = {'_work_inner', '_set_foreground_state', '_push', '_reply_task', '_reply_current', '_push_reply',
-             'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
-             '_take_pregen', '_gen_with_pregen', '_finish_generate',
-             '_prejudge_loop', '_pregen_loop'}
-    methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
-    for method in methods:
-        method.decorator_list = []
-    klass = ast.ClassDef(name='Harness', bases=[], keywords=[], body=methods, decorator_list=[])
-    scope = {'fill': SimpleNamespace(locate_input=Mock(return_value={'box': None, 'rect': None, 'reason': 'test'})), 'time': time, 'threading': threading, '_log': lambda *_: None,
-             'frontmost_app_is_wechat': Mock(return_value=True),
-             'screen_capture_ok': Mock(return_value=True), 'request_screen_capture': Mock(),
-             'read_conversation': Mock(),
-             'PALETTE': {'muted': None}, 'CONTEXT_TURNS': 8, 'JUDGE_TURNS': 4,
-             'SLOW_TICK': 1, 'BURST_TICK': .45, 'FAST_TICK': .25, 'BURST_READS': 3,
-             'READ_FAILURE_HIDE_S': 2,
-             'SETTLE_S': 1.2, 'STABLE_READS': 3, 'EARLY_SETTLE_S': .7, 'MIN_GAP_S': 2}
-    module = ast.fix_missing_locations(ast.Module(body=[klass], type_ignores=[]))
-    exec(compile(module, str(ROOT / 'src/hud.py'), 'exec'), scope)
-    return scope['Harness'], scope
-
-
-Harness, HUD = hud_harness()
-
-
-def block(text, x, y, w, h=.035):
-    return TextBlock(text, 1.0, x, y, w, h)
-
-
-class OutgoingTests(unittest.TestCase):
+class HudReplyTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch('input_region.locate_visual_input', return_value=None))
         self.h = h = Harness()
@@ -108,24 +79,6 @@ class OutgoingTests(unittest.TestCase):
     def incoming(self):
         self.read([block('下午开会', .40, .70, .15)])
 
-    def test_short_chat_titles_survive_header_controls(self):
-        for name in ('王', '张三', '李经理', 'A', '7', '项目讨论群'):
-            with self.subTest(name=name):
-                blocks = [block(name, .40, .94, .16, .025),
-                          block('...', .92, .96, .03, .025),
-                          block('口', .85, .94, .025, .025)]
-                self.assertEqual(extract_chat_title(blocks), name)
-
-    def test_title_fragments_join_without_distant_controls(self):
-        blocks = [block('项目讨论', .40, .94, .12, .025),
-                  block('组', .54, .945, .025, .025),
-                  block('口口', .85, .95, .05, .025),
-                  block('折叠聊天', .40, .905, .10, .025),
-                  block('侧栏联系人', .10, .94, .15, .025),
-                  block('下午开会', .40, .70, .15)]
-        self.assertEqual(extract_chat_title(blocks), '项目讨论 组')
-        self.assertEqual(extract_chat_title(blocks[2:]), '')
-
     def test_switch_short_titles_with_same_message_invalidates_old_reply(self):
         titles = [extract_chat_title([block(name, .40, .94, .10, .025)])
                   for name in ('张三', '李经理')]
@@ -179,11 +132,6 @@ class OutgoingTests(unittest.TestCase):
         self.assertEqual(len(messages[0].lines), 3)
         self.assertIsNone(self.h._pregen_req)
 
-    def test_opposite_known_sides_never_fold_despite_close_edges(self):
-        messages = extract_messages([block('收到的消息', .495, .70, .18),
-                                     block('自己发出的消息', .51, .66, .34)])
-        self.assertEqual([m.side for m in messages], ['them', 'me'])
-
     def test_real_incoming_still_triggers_both_jobs_and_keeps_own_context(self):
         self.read([block('下午开会', .40, .70, .15), block('我会带材料', .78, .50, .10)])
         self.assertEqual(self.h._prejudge_req[0], '下午开会')
@@ -191,15 +139,6 @@ class OutgoingTests(unittest.TestCase):
         self.assertIn('我: 我会带材料', self.h._prejudge_req[1])
         self.flush()
         self.h.applyIncoming_.assert_called_once()
-
-    def test_incoming_wrapped_message_and_sender_preserved(self):
-        messages = extract_messages([block('小王', .40, .80, .05, .020),
-                                     block('第一行正文', .40, .65, .25),
-                                     block('续行正文', .405, .61, .12)])
-        self.assertEqual(len(messages), 1)
-        self.assertEqual(messages[0].side, 'them')
-        self.assertEqual(messages[0].sender, '小王')
-        self.assertEqual(len(messages[0].lines), 2)
 
     def test_no_incoming_clears_jobs_and_pending_ui(self):
         self.incoming()
