@@ -537,7 +537,15 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12, input_top=
                                     last_y=b.y, sender=pending_sender))
             pending_sender = None
 
-    return messages[-max_messages:]
+    # Stray sender names: WeChat renders one above every bubble — including
+    # image-only messages, whose media OCR cannot read — so a short them line that
+    # ended up as a message of its own is a name, never something to judge. Our own
+    # bubbles have no name above them, and short outgoing text can be just as small
+    # in a tall window, so only the them side is dropped. (#62)
+    named = [m for m in messages
+             if not (m.side == "them" and "\n" not in m.text
+                     and len(m.text) <= 16 and m.h < USERNAME_H_MAX)]
+    return named[-max_messages:]
 
 
 def looks_like_sender_name(msg: Message, following: Message | None) -> bool:

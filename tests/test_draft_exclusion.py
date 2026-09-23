@@ -8,7 +8,10 @@ import Quartz as Q
 import perception as p
 
 
-def block(text, top, height=.025, x=.4, width=.15):
+def block(text, top, height=.03, x=.4, width=.15):
+    # .03 is a body-sized line (≥ MESSAGE_H_MIN); a .025 default used to fall into
+    # the sender-name/body dead zone (USERNAME_H_MAX=.026 .. MESSAGE_H_MIN=.028)
+    # and read as a stray sender name once #62 restored that drop.
     return p.TextBlock(text, 1, x, 1-top-height, width, height)
 
 
@@ -25,8 +28,8 @@ class DraftExclusionTests(unittest.TestCase):
         for scale in (.5, 1, 1.4):
             messages = p.extract_messages([
                 block('测试成员-A', .4, .018*scale),
-                block('明白收到', .4+.035*scale, .025*scale, x=.412),
-                block('第二行正文', .4+.065*scale, .025*scale, x=.412)], input_top=.85)
+                block('明白收到', .4+.035*scale, .03*scale, x=.412),
+                block('第二行正文', .4+.065*scale, .03*scale, x=.412)], input_top=.85)
             self.assertEqual(messages[0].sender, '测试成员-A')
             self.assertEqual(messages[0].text, '明白收到\n第二行正文')
 

@@ -38,6 +38,22 @@ class PerceptionTests(unittest.TestCase):
                                      block('自己发出的消息', .51, .66, .34)])
         self.assertEqual([m.side for m in messages], ['them', 'me'])
 
+    def test_stray_small_type_sender_line_is_dropped(self):
+        # #62: a group-chat image/voice bubble renders only the sender name above
+        # it; the name alone must never become a message for the judge.
+        self.assertEqual(extract_messages([block('小王', .40, .60, .05, .020)]), [])
+        messages = extract_messages([block('小王', .40, .60, .05, .020),
+                                     block('自己发出的消息', .51, .66, .34)])
+        self.assertEqual([(m.text, m.side) for m in messages],
+                         [('自己发出的消息', 'me')])
+
+    def test_small_type_sender_above_message_still_attaches(self):
+        messages = extract_messages([block('小王', .40, .60, .05, .020),
+                                     block('下午开会', .40, .45, .15)])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].sender, '小王')
+        self.assertEqual(messages[0].text, '下午开会')
+
     def test_incoming_wrapped_message_and_sender_preserved(self):
         messages = extract_messages([block('小王', .40, .80, .05, .020),
                                      block('第一行正文', .40, .65, .25),
