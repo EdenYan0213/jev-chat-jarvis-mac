@@ -9,13 +9,14 @@ Two API shapes are supported, because providers disagree:
     anthropic  POST {base}/v1/messages           x-api-key + version    -> content[].text
 推 most providers (DeepSeek, 通义, Moonshot, SiliconFlow, Ollama, vLLM, OpenRouter) only
 speak the OpenAI shape; 智谱 and a few gateways offer both. User key prefixes select
-the shape; built-in credentials infer it from the base URL.
+the shape.
 
 Nothing is ever written back, and the key is never logged. Run
 `uv run python src/generate.py --check` to see which source is in use (key masked).
 
-Privacy: the boss's message text is sent to the provider. That is the one place this app
-leaves the machine — swap in a local model if that matters more than reply quality.
+Privacy: the current message and bounded Session context are sent to the configured
+provider for candidate writing and rolling summaries. Point the OpenAI-compatible
+configuration at a local server such as Ollama to keep this data on the machine.
 """
 
 from __future__ import annotations
@@ -46,7 +47,8 @@ DEFAULT_OPENAI_BASE = "https://api.openai.com/v1"
 DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com"
 MISSING_HINT = ("未配置生成层 Key：候选回复需要它，判断/风险不需要。"
                 "设置 OPENAI_API_KEY（或 ANTHROPIC_API_KEY）后重启，见 README 配置章节。")
-# 用的是随包分发的凭据时报这个来源名，日志/--check 里能一眼分清「内置」和「你自己配的」
+# Kept for derivative builds that deliberately provide defaults; this repository leaves
+# every builtin credential empty.
 BUILTIN_SOURCE = "内置默认"
 
 
@@ -277,7 +279,8 @@ def load_credentials() -> tuple[str, str, str, str, str]:
         OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL         the common case
         ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
     User credentials select the API shape by their prefix, including custom endpoints
-    whose URL contains no provider name. Built-in credentials still infer from the URL.
+    whose URL contains no provider name. Derivative builds may still provide an explicit
+    default; this repository does not.
     """
     oai = userconfig.provider("OPENAI")
     anth = userconfig.provider("ANTHROPIC")
@@ -289,8 +292,8 @@ def load_credentials() -> tuple[str, str, str, str, str]:
         base = anth["base"] or DEFAULT_ANTHROPIC_BASE
         return base, anth["key"], anth["model"] or DEFAULT_MODEL, anth["source"], "anthropic"
 
-    # 两个都没配：回退到随包分发的内置凭据，让应用开箱就能出候选。位置在最后，
-    # 所以内置永远不会盖掉用户显式配的那一组。
+    # Derivative builds may provide an explicit default. This repository leaves it empty,
+    # so an unconfigured install never sends chat content to a shared relay.
     if builtin.API_KEY:
         return (builtin.BASE_URL, builtin.API_KEY, _resolve_builtin_model(builtin.BASE_URL),
                 BUILTIN_SOURCE, pick_api_format(builtin.BASE_URL, None))
