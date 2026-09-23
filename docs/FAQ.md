@@ -1,6 +1,6 @@
 # 常见问题解答（FAQ）
 
-路径与排查类问题的速查。完整配置说明见 README[「配置」](../README.md#配置)，磁盘清理见[「磁盘占用与清理」](../README.md#磁盘占用与清理)。
+路径与常见报错的速查。完整配置说明见 README[「配置」](../README.md#配置)，磁盘清理见[「磁盘占用与清理」](../README.md#磁盘占用与清理)。
 
 ## 配置文件在哪？
 
@@ -32,6 +32,16 @@ tail -40 ~/Library/Logs/jev-jarvis.log   # 最近 40 行，贴 issue 用这个
 - 若设置过 `HF_HUB_CACHE` 或 `HF_HOME` 环境变量，模型位置以环境变量为准
 
 命令行提醒：`du -sh` 这个模型子目录会读出**偏小甚至接近 0** 的数字（HuggingFace Xet 缓存布局，实体 blob 存在模型目录之外），别用它判断「模型没下完」；以设置页显示的占用为准。
+
+## 安装时提示「已损坏，无法打开，你应该将它移到废纸篓」？
+
+浏览器下载的 zip 常见（Gatekeeper 隔离属性），右键打开也绕不过，**别删**——终端清掉隔离属性即可：
+
+```bash
+sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app
+```
+
+`.app` 改过名（如「jev-jarvis 2.app」）就把命令里的路径换成实际名字。装好后首次启动还需授予「屏幕录制」与「辅助功能」权限，详见 README[「只想用」](../README.md#只想用)一节。
 
 ## 还有问题？
 
