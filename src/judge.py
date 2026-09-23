@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+import time
 
 import numpy as np
 
@@ -207,8 +208,19 @@ def low_memory_reason() -> str | None:
                 "可配置 TYPESAFE_API_KEY 走云端判断")
     return None
 
-def _download_progress(report):
-    """A per-load HF progress bar: no global patch, disk scan, or UI work here."""
+# What the finished download bar hands over and what _load() shows for the weight
+# load itself; one constant so the two wordings cannot drift apart.
+LOADING_STATUS = "加载判断模型…"
+
+
+def _download_progress(report, min_interval=0.5):
+    """A per-load HF progress bar: no global patch, disk scan, or UI work here.
+
+    min_interval throttles report() — the bar fires per network chunk, thousands of
+    times a second on a fast link, and each report holds the GIL long enough to
+    starve the Cocoa main thread (probe run: beachball, then a full hang at 63%).
+    Issue #32 asks for a rough percentage; ~2 Hz is far beyond that.
+    """
     from huggingface_hub.utils import tqdm as HubProgress
     from tqdm.auto import tqdm
 
@@ -219,19 +231,33 @@ def _download_progress(report):
             self._model_bytes = kwargs.get("unit") == "B" and not name.endswith(".transfer")
             if self._model_bytes:
                 kwargs["disable"] = False  # Finder / HF quiet mode still needs UI progress
+            # Set before tqdm.__init__: it drives refresh()/display() internally,
+            # which reach _report() through the overrides below.
+            self._last_report = 0.0
+            self._min_interval = min_interval
             # Keep HF bar names, but bypass its terminal-only disable switch.
             tqdm.__init__(self, *args, **kwargs)
             self._report()
+            # The initial 0% line must not open the throttle window, or the first
+            # real progress is dropped with it.
+            self._last_report = 0.0
 
         def display(self, *args, **kwargs):
-            if self.fp.isatty():
+            # fp can be None with a closed fd 1 (detached start): getattr keeps the
+            # download alive where .isatty() would raise out of from_pretrained.
+            if getattr(self.fp, "isatty", lambda: False)():
                 return super().display(*args, **kwargs)
 
         def _report(self):
-            if self._model_bytes and self.total:
-                done = min(self.n, self.total)
-                report(f"下载判断模型 {int(done / self.total * 100)}% · "
-                       f"{done / 1e9:.1f}/{self.total / 1e9:.1f} GB")
+            if not (self._model_bytes and self.total):
+                return
+            done = min(self.n, self.total)
+            # Completion always reports (the 100% line must not be throttled away).
+            if done < self.total and time.monotonic() - self._last_report < self._min_interval:
+                return
+            self._last_report = time.monotonic()
+            report(f"下载判断模型 {int(done / self.total * 100)}% · "
+                   f"{done / 1e9:.1f}/{self.total / 1e9:.1f} GB")
 
         def update(self, n=1):
             result = super().update(n)
@@ -246,7 +272,7 @@ def _download_progress(report):
 
         def close(self):
             if not self.disable and self._model_bytes and self.total:
-                report("加载判断模型…")
+                report(LOADING_STATUS)
             super().close()
 
     return DownloadProgress
@@ -295,7 +321,7 @@ class Judge:
                 raise ModelNotDownloadedError(reason)
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
-            self.load_status = "加载判断模型…"
+            self.load_status = LOADING_STATUS
             try:
                 t = self.torch
                 self.tok = AutoTokenizer.from_pretrained(self.repo)

@@ -195,7 +195,7 @@ class HudController(NSObject):
         self._read_once = False        # first OCR call includes Vision's own load
         self._last_skip_reason = None
         self.judge = make_judge()
-        self._normal_status = ("等待微信消息…", PALETTE["muted"])
+        self._normal_status = (IDLE_STATUS, PALETTE["muted"])
         self._model_status = None
         self.generator = Generator()
         # 话术: per-slot tone selection. A slot on 不用 contributes no request and no rows,
@@ -1282,9 +1282,13 @@ class HudController(NSObject):
             self._model_status = status
             if status:
                 self._show()
-            elif was_live and self._wechat_frontmost is False:
+            elif was_live and (self._wechat_frontmost is not True
+                               or self._read_fail_hidden):
                 # The load just finished; applyHidden_ kept the panel up while it ran,
                 # so a WeChat that left in the meantime is hidden only now (review #41).
+                # The read-failure latch counts too: the panel was kept past the grace
+                # period only for the download's sake — and `is not True` also covers
+                # the pre-first-poll None, where foreground was never established.
                 if self.panel.isVisible():
                     self.panel.orderOut_(None)
             self._render("status", *self._normal_status)

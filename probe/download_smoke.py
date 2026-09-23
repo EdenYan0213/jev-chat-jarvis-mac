@@ -16,6 +16,11 @@ if not os.environ.get('HF_HOME'):
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
+# #55's download gate refuses an empty JUDGE_BACKEND on an empty cache — this probe
+# IS the explicit opt-in case. userconfig freezes os.environ at import time, so set
+# it HERE, not through the with-patch below: warm() runs on a worker thread after
+# that patch context is long gone.
+os.environ.setdefault('JUDGE_BACKEND', 'local')
 import AppKit as A
 from Foundation import NSDate
 import userconfig

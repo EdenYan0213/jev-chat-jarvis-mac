@@ -2,6 +2,7 @@
 import ast
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from judge import Judge, FallbackJudge, _download_progress
 class DownloadTests(unittest.TestCase):
     def test_resume_and_completion(self):
         reports = []
-        bar = _download_progress(reports.append)(unit='B', total=4_000_000_000,
+        bar = _download_progress(reports.append, min_interval=0)(unit='B', total=4_000_000_000,
                                                   initial=1_000_000_000, disable=True)
         self.assertIn('25% · 1.0/4.0 GB', reports[-1])
         bar.update(1_000_000_000)
@@ -28,6 +29,21 @@ class DownloadTests(unittest.TestCase):
         bar.close()
         self.assertEqual(len(reports), count)
 
+    def test_report_throttled_to_min_interval(self):
+        # Per-chunk update() storms held the GIL away from the Cocoa main thread
+        # (probe: beachball + hang at 63%). Intermediate reports are droppable.
+        reports = []
+        bar = _download_progress(reports.append, min_interval=0.5)(
+            unit='B', total=4_000_000_000, initial=0, disable=True)
+        bar.update(1_000_000_000)
+        self.assertIn('25%', reports[-1])          # first report always fires
+        bar.update(500_000_000)
+        self.assertIn('25%', reports[-1])          # inside the window: dropped
+        bar.update(2_500_000_000)
+        self.assertIn('100%', reports[-1])         # completion is never throttled
+        bar.close()
+        self.assertEqual(reports[-1], '加载判断模型…')
+
     def test_xet_transfer_is_not_counted_twice(self):
         try:
             # 私有模块：huggingface_hub 只钉下限，锁升级后接口可能变动——跳过而非收集期崩
@@ -38,7 +54,7 @@ class DownloadTests(unittest.TestCase):
         with XetDownloadProgressReporter(
             reconstruction_desc='model: reconstructing file', total=4_000_000_000,
             log_level=100, name='huggingface_hub.xet_get',
-            tqdm_class=_download_progress(reports.append),
+            tqdm_class=_download_progress(reports.append, min_interval=0),
         ) as progress:
             progress.update_progress(SimpleNamespace(
                 total_bytes_completed=1_000_000_000,
@@ -61,7 +77,7 @@ class DownloadTests(unittest.TestCase):
     def test_file_count_and_quiet_terminal(self):
         from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
         reports = []
-        cls = _download_progress(reports.append)
+        cls = _download_progress(reports.append, min_interval=0)
         with cls(total=1, unit='it', disable=True) as bar:
             bar.update()
         self.assertFalse(reports)
@@ -75,7 +91,7 @@ class DownloadTests(unittest.TestCase):
 
     def test_snapshot_total_updated_after_creation(self):
         reports = []
-        with _download_progress(reports.append)(unit='B', total=0) as bar:
+        with _download_progress(reports.append, min_interval=0)(unit='B', total=0) as bar:
             self.assertFalse(reports)
             bar.total = 100
             bar.refresh()
@@ -185,7 +201,8 @@ def hud_harness():
         name='Harness', bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[]))
     scope = {'PALETTE': {'amber': 'amber', 'muted': 'muted', 'red': 'red'},
             # tick_ 的前台检查在本测试作用域外：None 表示检查不了，tick_ 直接返回
-            'frontmost_app_is_wechat': lambda: None}
+            'frontmost_app_is_wechat': lambda: None,
+            'time': time}
     exec(compile(module, 'hud.py', 'exec'), scope)
     return scope['Harness']
 
