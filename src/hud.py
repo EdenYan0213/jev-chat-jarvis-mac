@@ -203,6 +203,7 @@ class HudController(NSObject):
         self.context_builder = None
         self.summary_worker = None
         self._last_observation = None
+        self._last_context = None
         self._last_purge_ts = time.time()
         self._storage_warning_shown = False
         try:
@@ -282,7 +283,8 @@ class HudController(NSObject):
         self._expanded_h = None       # full height, captured the first time we collapse
         self._paused = not bool(
             load_credentials()[1]
-            or userconfig.get("TYPESAFE_API_KEY", "JEV_API_KEY"))
+            or userconfig.get(
+                "JEV_JUDGE_API_KEY", "TYPESAFE_API_KEY", "JEV_API_KEY"))
         # YOLO overlay default: JEV_BOXES=1 (or true/yes/on) in the env file starts it on;
         # either way the menu-bar item flips it at runtime
         self._show_boxes = userconfig.get("JEV_BOXES").strip().lower() in (
@@ -1169,6 +1171,7 @@ class HudController(NSObject):
         self._fingerprint = None
         self._last_full = None
         self._last_observation = None
+        self._last_context = None
         self._stable_n = 0
         self._burst_left = BURST_READS
         self._last_skip_reason = None
@@ -1470,6 +1473,7 @@ class HudController(NSObject):
             self._push("applyWaiting:", None)
             return
         now = time.time()
+        context = self._last_context
 
         # --- anti-flood: track arrivals, never analyze mid-burst
         if newest.text != self.last_seen:
@@ -1477,6 +1481,7 @@ class HudController(NSObject):
             self.last_change_ts = now
             context = self._managed_context(
                 msgs, newest, target_message_id, observation)
+            self._last_context = context
             # only on arrival: this function runs every second, and a per-tick line would
             # bury the timing that matters
             t = res.get("timing_ms") or {}
@@ -1503,10 +1508,13 @@ class HudController(NSObject):
             # same discipline for the generation half: fire now, supersede on the next
             # arrival, spend at settle. Tones are captured here — a dropdown click during
             # the window invalidates the result at consumption time (checked in _take_pregen)
-            self._pregen_req = (newest.text, context,
-                                tuple(self.slot_tones), self._reply_epoch)
+            shared_model = bool(getattr(
+                self.judge, "shares_generation_model", False))
+            self._pregen_req = None if shared_model else (
+                newest.text, context, tuple(self.slot_tones), self._reply_epoch)
             self._pregen_result = None
-            self._pregen_event.set()
+            if not shared_model:
+                self._pregen_event.set()
             # keep the previous verdict readable; just badge that something new landed
             self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
 
@@ -1810,6 +1818,38 @@ class HudController(NSObject):
         import concurrent.futures as cf
 
         t0 = time.perf_counter()
+        if getattr(self.judge, "shares_generation_model", False):
+            verdict = None
+            t_judge = time.perf_counter()
+            try:
+                with self._model_lock:
+                    verdict = self.judge.judge(
+                        newest.text, context=context)
+                ms = (time.perf_counter() - t_judge) * 1000
+                first = not self._judged_once
+                self._judged_once = True
+                note = "（首次，含本地模型加载）" if first else ""
+                _log(f"判断 {ms:.0f}ms → {verdict.get('intent', '?')}"
+                     f" 把握 {verdict.get('confidence', 0):.0%}"
+                     f" 风险 {verdict.get('risk', '?')}{note}")
+                self._push("applyJudgment:", (verdict, newest.sender, prev_text))
+            except Exception as e:
+                _log(f"判断失败 {type(e).__name__}: {str(e)[:60]}")
+                self._push(
+                    "applyError:",
+                    f"判断失败: {type(e).__name__}: {str(e)[:40]}")
+            try:
+                gen = self._gen_with_pregen(
+                    newest.text, context, self._stream_hook(t0))
+            except Exception as e:
+                _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
+                self._push(
+                    "applyError:",
+                    f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
+                return
+            self._finish_generate(gen, newest, t0, verdict)
+            return
+
         with cf.ThreadPoolExecutor(max_workers=2) as ex:
             # generation does not need the intent, so it runs while judging; it prefers an
             # early run that started at detection time (_gen_with_pregen) — only a miss
@@ -1881,7 +1921,10 @@ class HudController(NSObject):
         ranked = self._rank_payload(payload, newest.text, intent) if intent else payload
         rank_ms = (time.perf_counter() - t_rank) * 1000
         if intent:
-            _log(f"排序 {rank_ms:.0f}ms（本地模型，一次前向）")
+            if getattr(self.judge, "ranks_candidates", True):
+                _log(f"排序 {rank_ms:.0f}ms（本地模型，一次前向）")
+            else:
+                _log("候选保持生成顺序 · 省略共享大模型的二次排序")
         _log(f"端到端 {(time.perf_counter() - t0) * 1000:.0f}ms"
              f" · 从分析开始到候选上屏")
         self._push("applyCandidates:", ranked)
@@ -2207,8 +2250,7 @@ def main() -> None:
     # First line of every run: which backends are actually in play. Support requests
     # always need it, and it proves the log is live before the first message arrives.
     _base, _key, _model, _src, _api = load_credentials()
-    _log(f"启动 · 判断层 "
-         f"{'TypeSafe Jev' if userconfig.get('TYPESAFE_API_KEY') else '本地 decider-2b'}"
+    _log(f"启动 · 判断层 {getattr(controller.judge, 'name', '未知')}"
          f" · 生成层 {(_base + ' / ' + _model) if _key else '未配置（候选区会是空的）'}"
          + ("（内置默认）" if _src == BUILTIN_SOURCE else "")
          + (" · YOLO 框开" if controller._show_boxes else ""))

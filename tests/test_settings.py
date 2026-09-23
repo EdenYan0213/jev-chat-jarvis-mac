@@ -39,6 +39,21 @@ class SettingsFiles(unittest.TestCase):
                 config.write_settings(path, 'old content', {'OPENAI_MODEL': 'test'})
             self.assertEqual(path.read_text(), 'new content')
 
+    def test_writes_shared_local_judge_settings(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "env"
+            text = config.write_settings(path, "", {
+                "JEV_JUDGE_BACKEND": "openai",
+                "JEV_JUDGE_BASE_URL": "http://127.0.0.1:11434/v1",
+                "JEV_JUDGE_MODEL": "qwen3.5:4b",
+                "OPENAI_EXTRA_BODY": '{"keep_alive":"60s"}',
+            })
+            parsed = userconfig.parse_env_file(path)
+            self.assertEqual(parsed["JEV_JUDGE_BACKEND"], "openai")
+            self.assertEqual(
+                parsed["JEV_JUDGE_MODEL"], "qwen3.5:4b")
+            self.assertIn("OPENAI_EXTRA_BODY", text)
+
     def test_no_partial_save_on_invalid_value(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "env"

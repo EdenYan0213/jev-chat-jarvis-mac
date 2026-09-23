@@ -23,6 +23,11 @@ The names are the conventional ones you likely already export for other tools:
     TYPESAFE_BASE_URL    default https://api.typesafe.ai   (gateways: see README)
     TYPESAFE_MODEL       default jev-latest
 
+    JEV_JUDGE_BACKEND    openai / ollama / openjev uses a text model for judgment
+    JEV_JUDGE_API_KEY    optional; falls back to OPENAI_API_KEY
+    JEV_JUDGE_BASE_URL   optional; falls back to OPENAI_BASE_URL
+    JEV_JUDGE_MODEL      optional; falls back to OPENAI_MODEL
+
     OPENAI_API_KEY       reply-candidate generation, any OpenAI-compatible endpoint
     OPENAI_BASE_URL      e.g. https://api.deepseek.com, http://localhost:11434/v1
     OPENAI_MODEL         e.g. deepseek-chat, glm-4-flash, qwen2.5:7b

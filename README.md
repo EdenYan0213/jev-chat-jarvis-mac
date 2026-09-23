@@ -78,7 +78,7 @@ uv run python probe/bootstrap_regression.py      # 两种启动入口的离线�
 
 ## 配置
 
-判断层 key 可以不填，不填时走本地 decider-2b（首次下载约 7 GB）。候选生成需要配置自己的 OpenAI/Anthropic 兼容服务，也可以设置 `JEV_GENERATION_ENABLED=0` 只保留判断和会话记录。全部配置在一个 env 文件（**不提供第二种格式**）：
+判断层可使用 TypeSafe Jev、独立本地模型，或设置 `JEV_JUDGE_BACKEND=openai` 与候选生成共用一个 OpenAI 兼容模型。共用本机 Ollama 可以避免 Laya/decider 与生成模型同时占用内存。也可以设置 `JEV_GENERATION_ENABLED=0` 只保留判断和会话记录。全部配置在一个 env 文件（**不提供第二种格式**）：
 
 ### 可视化配置（#18）
 
@@ -102,12 +102,18 @@ cat > ~/.config/jev-jarvis/env <<'ENV'
 # 判断层（可选）：TypeSafe Jev，不填用本地 decider-2b
 export TYPESAFE_API_KEY=""
 
+# 本机低内存方案：判断和候选共用同一 Ollama 权重
+export JEV_JUDGE_BACKEND="openai"
+export JEV_JUDGE_API_KEY="ollama"
+export JEV_JUDGE_BASE_URL="http://127.0.0.1:11434/v1"
+export JEV_JUDGE_MODEL="qwen3.5:4b"
+
 # 生成层：任意 OpenAI 兼容端点
-export OPENAI_API_KEY="sk-你的key"
-export OPENAI_BASE_URL="https://api.deepseek.com"
-export OPENAI_MODEL="deepseek-chat"
+export OPENAI_API_KEY="ollama"
+export OPENAI_BASE_URL="http://127.0.0.1:11434/v1"
+export OPENAI_MODEL="qwen3.5:4b"
 # 端点的思考模式要靠额外字段关时填（Qwen3 这类不关会慢几十倍）
-# export OPENAI_EXTRA_BODY='{"enable_thinking":false}'
+export OPENAI_EXTRA_BODY='{"reasoning_effort":"none","keep_alive":"60s"}'
 
 # 不需要候选回复时可关闭；判断和 Session 保存仍继续
 # export JEV_GENERATION_ENABLED=0
@@ -124,7 +130,7 @@ chmod 600 ~/.config/jev-jarvis/env
 
 | 内容 | 位置 | 大小 | 清理 |
 |---|---|---|---|
-| 判断层本地模型 `decider-2b`（不配判断层 key 才会下载，判断+排序共用） | `~/.cache/huggingface/hub/models--Mapika--decider-2b` | ~7 GB | `rm -rf ~/.cache/huggingface/hub/models--Mapika--decider-2b`；之后走本地判断会重新下载 |
+| 可选判断层本地模型 `decider-2b`（仅默认兜底路径使用） | `~/.cache/huggingface/hub/models--Mapika--decider-2b` | ~7 GB | 使用 `JEV_JUDGE_BACKEND=openai` 后不再加载；可自行清理缓存 |
 | Python 运行环境（venv） | `~/Library/Application Support/jev-jarvis/venv` | ~0.7 GB | 删除 .app 不会连带删它，需手动删 |
 | 本地 Session、双方可见消息与摘要 | `~/Library/Application Support/jev-jarvis/conversations.sqlite3` | 随历史增长 | 在「会话管理」删除，或退出应用后手动删除数据库 |
 
@@ -156,7 +162,7 @@ chmod 600 ~/.config/jev-jarvis/env
 - **贡献前必读**：[CONTRIBUTING.md](CONTRIBUTING.md)——动代码前先在 issue 认领（评论 + assignee），分层自测改哪层跑哪层
 - 配置界面自测：`uv run python -B -m unittest discover -s tests`；macOS 原生窗口与按钮流程：`uv run python -B probe/settings_smoke.py`（临时配置 + 本地测试服务，不使用个人密钥）。
 - 打包 `./packaging/build_app.sh`；发版 `./packaging/release.sh --publish`（干净 worktree 构建 + 解压回验 + gh release）。版本号只有 `pyproject.toml` 一处；有开发者证书可加 `--sign "Developer ID Application: ..."`
-- 架构一句话：进程内抓微信窗口 → Vision OCR（只扫聊天区）→ 本地 decider-2b 出意图/风险 → LLM 并发出候选 → 本地排序 → 悬浮窗 NSPanel。抓窗口不抓屏：微信被挡住也能抓，悬浮窗不污染 OCR
+- 架构一句话：进程内抓微信窗口 → Vision OCR（只扫聊天区）→ 配置的判断后端出意图/风险/情绪 → LLM 出候选 → 悬浮窗 NSPanel。判断与生成可共用同一 Ollama 权重，避免双模型常驻。抓窗口不抓屏：微信被挡住也能抓，悬浮窗不污染 OCR
 
 ## 许可与免责
 

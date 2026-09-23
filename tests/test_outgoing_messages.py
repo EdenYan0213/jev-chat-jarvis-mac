@@ -76,6 +76,10 @@ class OutgoingTests(unittest.TestCase):
         h._payload_current = lambda _: True
         h.generator = Mock()
         h.judge = Mock()
+        h.judge.shares_generation_model = False
+        h.judge.ranks_candidates = True
+        h._run_generation = Mock()
+        h._run_analysis = Mock()
         h._model_lock = threading.Lock()
         h._judged_once = True
         for name in ['applyIncoming_', 'applyPending_', 'applyJudgment_',
@@ -161,6 +165,30 @@ class OutgoingTests(unittest.TestCase):
         self.assertIn('我: 我会带材料', self.h._prejudge_req[1])
         self.flush()
         self.h.applyIncoming_.assert_called_once()
+
+    def test_shared_judge_model_defers_generation_until_after_judgment(self):
+        self.h.judge.shares_generation_model = True
+
+        self.incoming()
+
+        self.assertIsNotNone(self.h._prejudge_req)
+        self.assertIsNone(self.h._pregen_req)
+        self.assertFalse(self.h._pregen_event.is_set())
+
+    def test_settle_reuses_context_captured_on_the_arrival_read(self):
+        self.incoming()
+        context = self.h._last_context
+        epoch = self.h._reply_epoch
+        verdict = {"intent": "约会议", "confidence": 0.9, "risk": 1}
+        self.h._prejudge_result = (
+            "下午开会", verdict, "", "", epoch)
+        self.h.last_change_ts = time.time() - 2
+
+        with patch.object(HUD["threading"], "Thread") as thread:
+            self.read_unchanged()
+
+        args = thread.call_args.kwargs["args"]
+        self.assertEqual(args[-1], context)
 
     def test_fresh_snapshot_persists_both_sides_and_shares_managed_context(self):
         session = SimpleNamespace(id="session-1", chat_key="chat")

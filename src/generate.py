@@ -1,8 +1,8 @@
 """Candidate reply generation via a fast Chinese LLM API.
 
-Why an API instead of a local model: a 3B local model costs ~6 GB of disk, ~2-3 s per
-generation on MPS and writes noticeably worse Chinese than the hosted fast tier. The
-judgment half stays local (decider-2b, ~0.5 s, no network) — only reply writing goes out.
+The generation endpoint may be hosted or local. This build can also point its structured
+judgment backend at the same OpenAI-compatible local model, avoiding a second resident
+model while keeping chat content on the machine.
 
 Two API shapes are supported, because providers disagree:
     openai     POST {base}/v1/chat/completions   Authorization: Bearer   -> choices[0].message.content

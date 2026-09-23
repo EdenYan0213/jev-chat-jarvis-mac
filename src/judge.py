@@ -66,6 +66,10 @@ ACTION_MAP = {
 class Judge:
     """Wraps a decoder-only decision model; lazy-loads on first use."""
 
+    name = "本地 decider-2b"
+    shares_generation_model = False
+    ranks_candidates = True
+
     def __init__(self, repo: str = "Mapika/decider-2b", device: str | None = None):
         import torch
 
@@ -265,6 +269,9 @@ class FallbackJudge:
         self.local = None
         self.fell_back = False
         self.reason = ""
+        self.name = "TypeSafe Jev"
+        self.shares_generation_model = False
+        self.ranks_candidates = True
 
     def _fallback(self):
         if self.local is None:
@@ -297,7 +304,11 @@ class FallbackJudge:
 
 
 def make_judge():
-    """Jev when a key is configured, otherwise the local decider-2b."""
+    """Select the configured judgment backend."""
+    import judge_openai
+    if judge_openai.configured():
+        # An explicitly selected shared model must never silently load decider-2b.
+        return judge_openai.OpenAIJudge()
     try:
         import judge_jev
         if judge_jev.jev_configured():
