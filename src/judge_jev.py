@@ -28,6 +28,12 @@ import time
 import urllib.error
 
 import userconfig
+from emotions import (
+    EMOTIONS,
+    EMOTION_INTENSITY_LEVELS,
+    EMOTION_TRENDS,
+    normalize_emotion_fields,
+)
 from generate import http_post_json
 from judge import ACTION_MAP, INTENTS, RISK_LEVELS
 
@@ -66,12 +72,30 @@ class JevJudge:
                 "risk": {"type": "score",
                          "instructions": "如果直接回复这句话，风险有多大？",
                          "criteria": RISK_LEVELS},
+                "emotion": {
+                    "type": "choice",
+                    "instructions": "结合完整会话，最新消息的主情绪是什么？",
+                    "criteria": EMOTIONS,
+                },
+                "emotion_intensity": {
+                    "type": "score",
+                    "instructions": "最新消息的情绪强度有多高？",
+                    "criteria": EMOTION_INTENSITY_LEVELS,
+                },
+                "emotion_trend": {
+                    "type": "choice",
+                    "instructions": "相比会话前文，最新消息的情绪趋势是什么？",
+                    "criteria": EMOTION_TRENDS,
+                },
             },
         }
         data = self._post(payload)
         answers = data.get("answers") or {}
         intent_ans = answers.get("intent") or {}
         risk_ans = answers.get("risk") or {}
+        emotion_ans = answers.get("emotion") or {}
+        intensity_ans = answers.get("emotion_intensity") or {}
+        trend_ans = answers.get("emotion_trend") or {}
 
         intent = intent_ans.get("choice") or "闲聊"
         if intent not in INTENTS:
@@ -85,6 +109,12 @@ class JevJudge:
         confidence = float(intent_ans.get("confidence") or 0.0)
         risk = risk_ans.get("score")
         risk = float(risk) if isinstance(risk, (int, float)) else 0.0
+        emotion_fields = normalize_emotion_fields(
+            emotion=emotion_ans.get("choice"),
+            confidence=emotion_ans.get("confidence"),
+            intensity=intensity_ans.get("score"),
+            trend=trend_ans.get("choice"),
+        )
 
         return {
             "intent": intent,
@@ -95,6 +125,7 @@ class JevJudge:
             "actions": ACTION_MAP.get(intent, []),
             "message": message,
             "backend": f"jev/{self.model}",
+            **emotion_fields,
         }
 
     def rank_candidates(self, message: str, intent: str,

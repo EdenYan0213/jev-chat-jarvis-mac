@@ -13,6 +13,14 @@ import threading
 
 import numpy as np
 
+from emotions import (
+    EMOTIONS,
+    EMOTION_INTENSITY_LEVELS,
+    EMOTION_TRENDS,
+    ensure_emotion_fields,
+    normalize_emotion_fields,
+)
+
 # 描述保持这个长度是有实测依据的，别为了省 prefill 时间去瘦身：两轮压缩措辞
 # （保语义锚点、每条砍 ~1/3 字符）在 22 条回归上分别是 81.8% 和 77.3%，都低于
 # 原文的 86.4%——批评/要解释 的边界对措辞极敏感。省下的 ~100 ms 判断又藏在
@@ -165,6 +173,8 @@ class Judge:
     def judge(self, message: str, context: str | None = None) -> dict:
         self._load()
         intents = list(INTENTS)
+        emotions = list(EMOTIONS)
+        trends = list(EMOTION_TRENDS)
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
         prompt = f"Context:\n{context + chr(10) + chr(10) if context else ''}{message}\n\n"
@@ -178,14 +188,47 @@ class Judge:
         for i, lv in enumerate(RISK_LEVELS):
             prompt += f"({letters[i]}) {lv}\n"
         prompt += "Answer: ("
+        # slot 2: primary emotion
+        prompt += "\n\nQuestion: 结合完整会话，这句话的主情绪是什么？\nOptions:\n"
+        for i, name in enumerate(emotions):
+            prompt += f"({letters[i]}) {name} - {EMOTIONS[name]}\n"
+        prompt += "Answer: ("
+        # slot 3: emotion intensity
+        prompt += "\n\nQuestion: 这句话的情绪强度有多高？\nOptions:\n"
+        for i, level in enumerate(EMOTION_INTENSITY_LEVELS):
+            prompt += f"({letters[i]}) {level}\n"
+        prompt += "Answer: ("
+        # slot 4: emotion trend relative to prior turns
+        prompt += "\n\nQuestion: 相比会话前文，这句话的情绪趋势是什么？\nOptions:\n"
+        for i, name in enumerate(trends):
+            prompt += f"({letters[i]}) {name} - {EMOTION_TRENDS[name]}\n"
+        prompt += "Answer: ("
 
-        logits, slot_token_idx = self._forward(prompt, 2)
+        logits, slot_token_idx = self._forward(prompt, 5)
 
         intent_probs = self._slot_probs([logits[slot_token_idx[0]]], len(intents), 0)
         risk_probs = self._slot_probs([logits[slot_token_idx[1]]], len(RISK_LEVELS), 0)
+        emotion_probs = self._slot_probs(
+            [logits[slot_token_idx[2]]], len(emotions), 0)
+        intensity_probs = self._slot_probs(
+            [logits[slot_token_idx[3]]],
+            len(EMOTION_INTENSITY_LEVELS), 0)
+        trend_probs = self._slot_probs(
+            [logits[slot_token_idx[4]]], len(trends), 0)
 
         intent_idx = int(np.argmax(intent_probs))
         risk_value = float((np.arange(len(RISK_LEVELS)) * risk_probs).sum())
+        emotion_idx = int(np.argmax(emotion_probs))
+        intensity_value = float((
+            np.arange(len(EMOTION_INTENSITY_LEVELS))
+            * intensity_probs).sum())
+        trend_idx = int(np.argmax(trend_probs))
+        emotion_fields = normalize_emotion_fields(
+            emotion=emotions[emotion_idx],
+            confidence=float(emotion_probs[emotion_idx]),
+            intensity=intensity_value,
+            trend=trends[trend_idx],
+        )
 
         return {
             "intent": intents[intent_idx],
@@ -195,6 +238,7 @@ class Judge:
             "risk_probs": {str(i): float(p) for i, p in enumerate(risk_probs)},
             "actions": ACTION_MAP.get(intents[intent_idx], []),
             "message": message,
+            **emotion_fields,
         }
 
 
@@ -230,13 +274,14 @@ class FallbackJudge:
     def judge(self, message: str, context: str | None = None) -> dict:
         if not self.fell_back:
             try:
-                return self.primary.judge(message, context)
+                return ensure_emotion_fields(
+                    self.primary.judge(message, context))
             except Exception as e:
                 self.fell_back = True
                 self.reason = f"{type(e).__name__}: {str(e)[:80]}"
         out = self._fallback().judge(message, context)
         out["backend"] = f"local (Jev 不可用: {self.reason})"
-        return out
+        return ensure_emotion_fields(out)
 
     def rank_candidates(self, message: str, intent: str, candidates: list[str]) -> list[dict]:
         if not self.fell_back:

@@ -72,6 +72,7 @@ from perception import (  # noqa: E402
 from judge import make_judge  # noqa: E402
 from generate import (BUILTIN_SOURCE, Generator, generation_enabled,
                       load_credentials)  # noqa: E402
+from emotions import format_emotion  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
 import ui_style  # noqa: E402
@@ -325,8 +326,8 @@ class HudController(NSObject):
         # Decorative surfaces are fixed; every string still comes from the existing rows.
         for surface, x, top, w, h in (
             (self._make_surface(12, PALETTE["surface"]), 14, 54, PANEL_W - 28, 62),
-            (self._make_surface(12, PALETTE["surface"]), 14, 124, PANEL_W - 28, 72),
-            (self._make_surface(10, PALETTE["surface"]), 14, 204, PANEL_W - 28, 34),
+            (self._make_surface(12, PALETTE["surface"]), 14, 124, PANEL_W - 28, 78),
+            (self._make_surface(10, PALETTE["surface"]), 14, 210, PANEL_W - 28, 34),
         ):
             view.addSubview_(surface)
             self._fixed.append((surface, x, top, w, h))
@@ -344,7 +345,7 @@ class HudController(NSObject):
                                         color=PALETTE["text"], bold=True)
         action_label.setStringValue_("具体行动")
         view.addSubview_(action_label)
-        self._fixed.append((action_label, 26, 213, 58, 16))
+        self._fixed.append((action_label, 26, 219, 58, 16))
         self._detail_views.append(action_label)
 
         risk_title = self._make_label(0, 0, 64, 14, size=9, color=PALETTE["muted"])
@@ -375,7 +376,8 @@ class HudController(NSObject):
             ("intent", 26, 136, 116, 26, 20, PALETTE["text"], True),
             ("confidence", 26, 166, 116, 16, 11, PALETTE["muted"], False),
             ("risk", 164, 137, 92, 24, 14, PALETTE["green"], True),
-            ("actions", 94, 213, 236, 16, 11, PALETTE["text"], False),
+            ("emotion", 26, 184, PANEL_W - 52, 14, 11, PALETTE["muted"], False),
+            ("actions", 94, 219, 236, 16, 11, PALETTE["text"], False),
         ):
             tf = self._make_label(x, 0, w, h, size=size, color=color, bold=bold)
             if key in {"message", "actions"}:
@@ -391,9 +393,9 @@ class HudController(NSObject):
         view.addSubview_(header)
         self.rows["cand_header"] = header
         self._set_candidate_header("候选回复（按合适度排序）")
-        self._fixed.append((header, 18, 250, PANEL_W - 36, 18))
+        self._fixed.append((header, 18, 256, PANEL_W - 36, 18))
         self._detail_views.append(header)
-        self._group_top = 274
+        self._group_top = 280
 
         # ---- 话术 groups: each dropdown heads a group and its candidates sit underneath,
         # so the tone is labelled by the thing that selects it. Every group's controls exist
@@ -1073,6 +1075,7 @@ class HudController(NSObject):
             self._render("intent", "—", PALETTE["muted"])
             self._render("confidence", "", PALETTE["muted"])
             self._render("risk", "", PALETTE["muted"])
+            self._render("emotion", "", PALETTE["muted"])
             if hasattr(self, "_risk_dots"):
                 self._set_risk_scale(None)
             self._render("actions", "", PALETTE["text"])
@@ -1100,8 +1103,10 @@ class HudController(NSObject):
     def _set_collapsed(self, collapsed: bool):
         """Roll the panel up to a title+status strip, or back to full height."""
         self._collapsed = collapsed
-        controlled = ["message", "sender", "intent", "confidence", "risk", "actions",
-                      "cand_header"]   # "chat" and "status" survive collapsing
+        controlled = [
+            "message", "sender", "intent", "confidence", "risk", "emotion",
+            "actions", "cand_header",
+        ]   # "chat" and "status" survive collapsing
         for key in controlled:
             self.rows[key].setHidden_(collapsed)
         for view in self._detail_views:
@@ -1639,7 +1644,9 @@ class HudController(NSObject):
         self._last_risk = 0.0
         self._clear_candidates()
         self._stream_rows = {}
-        for key in ("message", "sender", "intent", "confidence", "risk", "actions"):
+        for key in (
+                "message", "sender", "intent", "confidence",
+                "risk", "emotion", "actions"):
             self._render(key, "", PALETTE["muted"])
         if hasattr(self, "_risk_dots"):
             self._set_risk_scale(None)
@@ -1708,6 +1715,7 @@ class HudController(NSObject):
         self._render("risk", f"● {label}  {risk}/9", color)
         if hasattr(self, "_risk_dots"):
             self._set_risk_scale(risk)
+        self._render("emotion", format_emotion(v), PALETTE["muted"])
         self._render("actions", " · ".join(v.get("actions", [])), PALETTE["text"])
         self._set_candidate_header(
             "候选回复 · 生成中…" if generation_enabled() else "候选回复 · 已关闭")
