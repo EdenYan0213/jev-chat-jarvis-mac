@@ -418,9 +418,11 @@ def extract_chat_title(blocks: list[TextBlock]) -> str:
     cands = [b for b in blocks
              if b.x >= CHAT_PANE_X_MIN and b.y > TITLE_BAR_Y_MAX
              and not _is_noise(b)]
-    # ponytail: WeChat titles are left-aligned; centered headers need layout detection.
-    # Locate the title before considering the call/menu glyphs on the right. A real
-    # contact name can be just one character, so length cannot distinguish the two.
+    # No length cap on purpose: an empty title collides reply keys across chats
+    # (key = (chat_title, text)), which is worse than the occasional single-glyph
+    # OCR smudge promoted to a title.
+    # WeChat titles are left-aligned; centered headers would need layout detection.
+    # A real contact name can be one character, so length cannot tell title from controls.
     starts = [b for b in cands if b.x < (CHAT_PANE_X_MIN + 1) / 2]
     if not starts:
         return ""
