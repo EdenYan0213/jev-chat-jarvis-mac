@@ -70,8 +70,7 @@ userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inheri
 from perception import (  # noqa: E402
     read_conversation, screen_capture_ok, request_screen_capture, warm_ocr)
 from judge import make_judge  # noqa: E402
-from generate import (BUILTIN_SOURCE, Generator, generation_enabled,
-                      load_credentials)  # noqa: E402
+from generate import BUILTIN_SOURCE, Generator, load_credentials, generation_enabled  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
 import ui_style  # noqa: E402
@@ -248,8 +247,7 @@ class HudController(NSObject):
         self._collapsed = False
         self._expanded_h = None       # full height, captured the first time we collapse
         self._paused = not bool(
-            load_credentials()[1]
-            or userconfig.get("TYPESAFE_API_KEY", "JEV_API_KEY"))
+            load_credentials()[1] or userconfig.get("TYPESAFE_API_KEY", "JEV_API_KEY"))
         # YOLO overlay default: JEV_BOXES=1 (or true/yes/on) in the env file starts it on;
         # either way the menu-bar item flips it at runtime
         self._show_boxes = userconfig.get("JEV_BOXES").strip().lower() in (

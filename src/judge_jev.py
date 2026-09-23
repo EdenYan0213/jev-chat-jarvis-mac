@@ -103,8 +103,7 @@ class JevJudge:
         if not candidates:
             return []
         options = {f"reply_{i + 1}": text for i, text in enumerate(candidates)}
-        candidate_context = "\n".join(
-            f"{label}: {text}" for label, text in options.items())
+        candidate_context = "\n".join(f"{label}: {text}" for label, text in options.items())
         payload = {
             "model": self.model,
             "state": (f"收到的消息：{message}\n判断出的意图：{intent}"

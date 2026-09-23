@@ -351,8 +351,7 @@ class Generator:
             raise RuntimeError("Reply generation is disabled.")
         base, key, model, _src, api = load_credentials()
         if not key:
-            raise RuntimeError(
-                "Configure your own model credentials before generating replies.")
+            raise RuntimeError("Configure your own model credentials before generating replies.")
         # the constructor's overrides win — without this the `model` argument was accepted
         # and silently ignored, so the request went out with whatever the config named
         if self.model_override:

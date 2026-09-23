@@ -1,4 +1,4 @@
-"""Shared relay credentials are disabled for local builds."""
+"""Shared relay credentials are disabled for this local installation."""
 
 API_KEY = ""
 BASE_URL = ""
