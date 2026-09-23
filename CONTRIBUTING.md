@@ -30,6 +30,8 @@ gh issue edit <n> --add-assignee @me
 - PR 描述写清三件事：改了什么、为什么改、怎么测的（有实测数字写实测数字）；关联 issue 用 `Closes #n` 写在描述里，**不写进 commit 标题**（squash 合并会自动追加 PR 号，双编号分不清）。
 - 合并统一 squash，一个 issue 对应 master 上一个干净提交。
 - PR 出现冲突：`git fetch origin master && git rebase origin/master` 就地解决、自测跑过再 push，**不要**在 GitHub 网页上手改文件绕过（跳过了本地自测）。
+- **代解前先声明**：冲突原则上由 PR 作者自己 rebase 解决；维护者或其他 AI 会话想代解，必须先在 PR 里评论说一声「我来解冲突」，避免两条线同时在解、互相强推顶掉（#36 的实际教训）。
+- **fork PR 勾选允许维护者修改**：从 fork 提 PR 时勾选「Allow edits by maintainers」，维护者才能代为解决冲突或顺手小修，否则只能等你回来 rebase。
 
 ## 自测要求（CI 只管离线回归，其余绿灯就是你自己）
 
