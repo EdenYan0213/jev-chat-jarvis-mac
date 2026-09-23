@@ -17,6 +17,22 @@ EMOTIONS = {
     "疲惫": "表达精力耗尽、厌倦、无力或想暂停",
 }
 
+# Laya's native classifier reserves a fixed 256-token question head. Keep the
+# Jev-facing choice descriptions compact enough that all ten labels survive
+# exactly; the local decoder prompt can continue using the richer definitions.
+EMOTION_CHOICE_CRITERIA = {
+    "开心": "愉快满意",
+    "平静": "中性稳定",
+    "期待": "正向期待",
+    "困惑": "不理解或要澄清",
+    "焦虑": "担心失控",
+    "委屈": "被误解或不公平",
+    "生气": "不满责备",
+    "失望": "期待落空",
+    "悲伤": "难过失落",
+    "疲惫": "厌倦无力",
+}
+
 EMOTION_INTENSITY_LEVELS = [
     "没有明显情绪",
     "轻微情绪，可以平常回应",

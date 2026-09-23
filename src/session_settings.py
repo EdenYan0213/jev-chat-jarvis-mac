@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import sqlite3
+import threading
 from typing import Callable
 
 import AppKit as A
@@ -103,9 +105,11 @@ class SessionManagerPane(NSObject):
 
     @objc.python_method
     def build(self, store: ConversationStore, frame=None,
-              on_change: Callable[[str, bool], None] | None = None):
+              on_change: Callable[[str, bool], None] | None = None,
+              operation_lock=None):
         self.model = SessionManagerModel(store)
         self.on_change = on_change
+        self.operation_lock = operation_lock or threading.RLock()
         self.showing_trash = False
         self.rows: list[SessionRow] = []
 
@@ -234,22 +238,33 @@ class SessionManagerPane(NSObject):
     @objc.python_method
     def _run(self, operation, success: str):
         try:
-            row, active_changed = operation()
+            with self.operation_lock:
+                row, active_changed = operation()
+                self.refresh()
+                if row is not None:
+                    self._notify(row.chat_key, active_changed)
+        except sqlite3.Error:
+            self._set_status(
+                "会话数据库暂不可用，请重新打开应用。", True)
+            return
         except (KeyError, ValueError, OSError) as exc:
             self._set_status(str(exc) or "操作失败。", True)
             return
-        self.refresh()
         self._set_status(success)
-        if row is not None:
-            self._notify(row.chat_key, active_changed)
 
     @objc.python_method
     def refresh(self):
         search = self.search.stringValue() if hasattr(self, "search") else ""
-        self.rows = (
-            self.model.trash_rows(search)
-            if self.showing_trash else self.model.active_rows(search)
-        )
+        try:
+            self.rows = (
+                self.model.trash_rows(search)
+                if self.showing_trash else self.model.active_rows(search)
+            )
+        except sqlite3.Error:
+            self.rows = []
+            if hasattr(self, "status"):
+                self._set_status(
+                    "会话数据库暂不可用，请重新打开应用。", True)
         self.table.reloadData()
         self.rename_button.setHidden_(self.showing_trash)
         self.trash_button.setHidden_(self.showing_trash)
@@ -319,10 +334,14 @@ class SessionManagerPane(NSObject):
         row = self._selected()
         if row is None or self.showing_trash:
             return
-        active = self.model.store.active_session(row.chat_key)
-        active_changed = active is not None and active.id == row.id
+
+        def operation():
+            active = self.model.store.active_session(row.chat_key)
+            active_changed = active is not None and active.id == row.id
+            return self.model.trash(row.id), active_changed
+
         self._run(
-            lambda: (self.model.trash(row.id), active_changed),
+            operation,
             "会话已移到回收站，可在 30 天内恢复。",
         )
 

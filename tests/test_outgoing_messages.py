@@ -20,7 +20,7 @@ from perception import TextBlock, extract_messages
 def hud_harness():
     tree = ast.parse((ROOT / 'src/hud.py').read_text())
     source = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'HudController')
-    names = {'_work_inner', '_push', '_reply_task', '_reply_current', '_push_reply',
+    names = {'_work', '_work_inner', '_push', '_reply_task', '_reply_current', '_push_reply',
              'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
              '_take_pregen', '_gen_with_pregen', '_finish_generate',
              '_prejudge_loop', '_pregen_loop', '_observe_snapshot',
@@ -58,6 +58,7 @@ class OutgoingTests(unittest.TestCase):
             _gen_epoch=0, _last_skip_reason=None, _prejudge_req=None, _prejudge_result=None,
             _pregen_req=None, _pregen_result=None, _pregen_running=False,
             _prejudging=False, _paused=False, _analyzing=False,
+            _session_lock=threading.RLock(),
             _stable_n=0, last_change_ts=0, last_analyze_ts=0,
             _prejudge_event=threading.Event(), _pregen_event=threading.Event(),
             slot_tones=['normal'], _stream_rows={}, _last_context=None,
@@ -340,6 +341,67 @@ class OutgoingTests(unittest.TestCase):
         self.assertEqual(self.h._reply_epoch, old_epoch + 1)
         self.assertIsNone(self.h._last_full)
         self.assertEqual(self.h._next_read_ts, 0.0)
+
+    def test_session_switch_waits_for_inflight_read_to_finish(self):
+        entered = threading.Event()
+        release = threading.Event()
+        switched = threading.Event()
+
+        def blocking_read():
+            entered.set()
+            release.wait(1)
+
+        self.h._work_inner = blocking_read
+        self.h._chat_title = "chat"
+        self.h.session_store = Mock()
+        self.h.session_store.set_active_session.return_value = SimpleNamespace(
+            id="session-2", chat_key="chat", name="Second")
+
+        reader = threading.Thread(target=self.h._work)
+        reader.start()
+        self.assertTrue(entered.wait(1))
+
+        def switch():
+            self.h._select_session("session-2")
+            switched.set()
+
+        selector = threading.Thread(target=switch)
+        selector.start()
+        self.assertFalse(switched.wait(0.05))
+        self.h.session_store.set_active_session.assert_not_called()
+
+        release.set()
+        reader.join(1)
+        selector.join(1)
+        self.assertTrue(switched.is_set())
+        self.h.session_store.set_active_session.assert_called_once_with(
+            "chat", "session-2")
+
+    def test_new_session_seed_failure_still_invalidates_old_results(self):
+        self.h._chat_title = "chat"
+        self.h.session_store = Mock()
+        created = SimpleNamespace(
+            id="session-2", chat_key="chat", name="chat · 2026-09-23")
+        self.h.session_store.create_session.return_value = created
+        self.h.conversation_tracker = Mock()
+        self.h.conversation_tracker.observe.side_effect = OSError("disk")
+        self.h.summary_worker = Mock()
+        self.h._last_full = {"messages": [SimpleNamespace(
+            side="them", text="hello")]}
+        self.h._reply_key = ("chat", "session-1", "old")
+        self.h._prejudge_req = ("old",)
+        self.h._pregen_req = ("old",)
+        old_epoch = self.h._reply_epoch
+
+        result = self.h._create_session()
+
+        self.assertIs(result, created)
+        self.assertEqual(self.h._reply_epoch, old_epoch + 1)
+        self.assertIsNone(self.h._reply_key)
+        self.assertIsNone(self.h._prejudge_req)
+        self.assertIsNone(self.h._pregen_req)
+        self.assertIsNone(self.h.session_store)
+        self.assertIsNone(self.h.conversation_tracker)
 
     def test_prejudge_completion_cannot_repopulate_cleared_state(self):
         self.incoming()

@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from emotions import (
     EMOTIONS,
+    EMOTION_CHOICE_CRITERIA,
     EMOTION_INTENSITY_LEVELS,
     EMOTION_TRENDS,
     default_emotion_fields,
@@ -60,7 +61,8 @@ class JevEmotionTests(unittest.TestCase):
             {"intent", "risk", "emotion",
              "emotion_intensity", "emotion_trend"})
         self.assertEqual(
-            payload["questions"]["emotion"]["criteria"], EMOTIONS)
+            payload["questions"]["emotion"]["criteria"],
+            EMOTION_CHOICE_CRITERIA)
         self.assertEqual(
             payload["questions"]["emotion_intensity"]["criteria"],
             EMOTION_INTENSITY_LEVELS)

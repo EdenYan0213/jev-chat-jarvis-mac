@@ -197,6 +197,7 @@ class HudController(NSObject):
         self.judge = make_judge()
         # A local model may need more than 30 seconds for its first cold load.
         self.generator = Generator(timeout=90)
+        self._session_lock = threading.RLock()
         self.session_store = None
         self.conversation_tracker = None
         self.context_builder = None
@@ -666,12 +667,13 @@ class HudController(NSObject):
     @objc.python_method
     def _open_settings(self, mode: str):
         from settings import SettingsController
-        if getattr(self, "settings_controller", None) and self.settings_controller.window.isVisible():
+        if getattr(self, "settings_controller", None):
             self.settings_controller.show(mode)
             return
         try:
             self.settings_controller = SettingsController.alloc().init().build(
                 session_store=self.session_store,
+                session_lock=self._session_lock,
                 initial_mode=mode,
                 on_session_change=self._settings_session_changed,
             )
@@ -1174,91 +1176,101 @@ class HudController(NSObject):
 
     @objc.python_method
     def _select_session(self, session_id: str):
-        store = getattr(self, "session_store", None)
-        chat_title = getattr(self, "_chat_title", "")
-        if store is None:
-            raise RuntimeError("session storage is unavailable")
-        if not chat_title:
-            raise ValueError("no active chat")
-        session = store.set_active_session(chat_title, session_id)
-        self._reset_for_session_change()
-        return session
+        with self._session_lock:
+            store = getattr(self, "session_store", None)
+            chat_title = getattr(self, "_chat_title", "")
+            if store is None:
+                raise RuntimeError("session storage is unavailable")
+            if not chat_title:
+                raise ValueError("no active chat")
+            session = store.set_active_session(chat_title, session_id)
+            self._reset_for_session_change()
+            return session
 
     @objc.python_method
     def _refresh_session_popup(self, chat_title: str | None = None):
         popup = getattr(self, "session_popup", None)
-        store = getattr(self, "session_store", None)
         title = chat_title if chat_title is not None else self._chat_title
         if popup is None:
             return
-        if store is None or not title:
+        if not title:
             popup.setHidden_(True)
             return
-        try:
-            active = store.active_session(title)
-            if active is None:
-                active = store.resolve_session(title)
-            sessions = sorted(
-                store.list_sessions(title),
-                key=lambda session: (
-                    session.last_active_at, session.updated_at, session.id),
-                reverse=True,
-            )
-        except Exception as exc:
-            self._disable_persistence(exc)
-            popup.setHidden_(True)
-            return
+        with self._session_lock:
+            store = getattr(self, "session_store", None)
+            if store is None:
+                popup.setHidden_(True)
+                return
+            try:
+                active = store.active_session(title)
+                if active is None:
+                    active = store.resolve_session(title)
+                sessions = sorted(
+                    store.list_sessions(title),
+                    key=lambda session: (
+                        session.last_active_at, session.updated_at, session.id),
+                    reverse=True,
+                )
+            except Exception as exc:
+                self._disable_persistence(exc)
+                popup.setHidden_(True)
+                return
 
-        self._session_menu_refreshing = True
-        try:
-            popup.removeAllItems()
-            selected_index = 0
-            for index, session in enumerate(sessions):
-                popup.addItemWithTitle_(session.name)
-                popup.lastItem().setRepresentedObject_(session.id)
-                if active is not None and session.id == active.id:
-                    selected_index = index
-            popup.menu().addItem_(AppKit.NSMenuItem.separatorItem())
-            for label, action in (
-                    ("新建 Session…", "__new__"),
-                    ("管理 Session…", "__manage__")):
-                popup.addItemWithTitle_(label)
-                popup.lastItem().setRepresentedObject_(action)
-            if sessions:
-                popup.selectItemAtIndex_(selected_index)
-            popup.setHidden_(False)
-        finally:
-            self._session_menu_refreshing = False
+            self._session_menu_refreshing = True
+            try:
+                popup.removeAllItems()
+                selected_index = 0
+                for index, session in enumerate(sessions):
+                    popup.addItemWithTitle_(session.name)
+                    popup.lastItem().setRepresentedObject_(session.id)
+                    if active is not None and session.id == active.id:
+                        selected_index = index
+                popup.menu().addItem_(AppKit.NSMenuItem.separatorItem())
+                for label, action in (
+                        ("新建 Session…", "__new__"),
+                        ("管理 Session…", "__manage__")):
+                    popup.addItemWithTitle_(label)
+                    popup.lastItem().setRepresentedObject_(action)
+                if sessions:
+                    popup.selectItemAtIndex_(selected_index)
+                popup.setHidden_(False)
+            finally:
+                self._session_menu_refreshing = False
 
     @objc.python_method
     def _create_session(self):
-        store = getattr(self, "session_store", None)
-        chat_title = getattr(self, "_chat_title", "")
-        if store is None:
-            raise RuntimeError("session storage is unavailable")
-        if not chat_title:
-            raise ValueError("no active chat")
-        snapshot = getattr(self, "_last_full", None)
-        session = store.create_session(chat_title)
-        tracker = getattr(self, "conversation_tracker", None)
-        if tracker is not None and snapshot is not None:
-            observation = tracker.observe(
-                chat_title, snapshot.get("messages") or [])
-            worker = getattr(self, "summary_worker", None)
-            if worker is not None:
-                worker.schedule(observation.session.id)
-        self._reset_for_session_change()
-        return session
+        with self._session_lock:
+            store = getattr(self, "session_store", None)
+            chat_title = getattr(self, "_chat_title", "")
+            if store is None:
+                raise RuntimeError("session storage is unavailable")
+            if not chat_title:
+                raise ValueError("no active chat")
+            snapshot = getattr(self, "_last_full", None)
+            session = store.create_session(chat_title)
+            self._reset_for_session_change()
+            tracker = getattr(self, "conversation_tracker", None)
+            if tracker is not None and snapshot is not None:
+                try:
+                    observation = tracker.observe(
+                        chat_title, snapshot.get("messages") or [])
+                    worker = getattr(self, "summary_worker", None)
+                    if worker is not None:
+                        worker.schedule(observation.session.id)
+                except Exception as exc:
+                    self._disable_persistence(exc)
+            return session
 
     @objc.python_method
     def _settings_session_changed(self, chat_key: str,
                                   active_changed: bool):
-        if chat_key != getattr(self, "_chat_title", ""):
-            return
-        if active_changed:
-            self._reset_for_session_change()
-            self.applyWaiting_(None)
-        self._refresh_session_popup()
+        with self._session_lock:
+            if chat_key != getattr(self, "_chat_title", ""):
+                return
+            if active_changed:
+                self._reset_for_session_change()
+                self.applyWaiting_(None)
+            self._refresh_session_popup()
 
     def sessionChanged_(self, sender):
         if self._session_menu_refreshing:
@@ -1280,6 +1292,9 @@ class HudController(NSObject):
         self._refresh_session_popup()
 
     def quitApp_(self, sender):
+        settings = getattr(self, "settings_controller", None)
+        if settings is not None:
+            settings.close_resources()
         worker = getattr(self, "summary_worker", None)
         if worker is not None:
             worker.stop()
@@ -1334,7 +1349,8 @@ class HudController(NSObject):
     @objc.python_method
     def _work(self):
         try:
-            self._work_inner()
+            with self._session_lock:
+                self._work_inner()
         finally:
             self._busy = False
 
@@ -1706,29 +1722,30 @@ class HudController(NSObject):
 
     @objc.python_method
     def _disable_persistence(self, exc: Exception) -> None:
-        worker = getattr(self, "summary_worker", None)
-        if worker is not None:
-            try:
-                worker.stop(timeout=0.2)
-            except Exception:
-                pass
-        store = getattr(self, "session_store", None)
-        if store is not None:
-            try:
-                store.close()
-            except Exception:
-                pass
-        self.session_store = None
-        self.conversation_tracker = None
-        self.context_builder = None
-        self.summary_worker = None
-        self._last_observation = None
-        if not getattr(self, "_storage_warning_shown", False):
-            self._storage_warning_shown = True
-            _log(f"会话存储已停用 {type(exc).__name__}")
-            self._push(
-                "applyStorageWarning:",
-                f"会话记录暂不可用 · {type(exc).__name__} · 已改用屏幕上下文")
+        with self._session_lock:
+            worker = getattr(self, "summary_worker", None)
+            if worker is not None:
+                try:
+                    worker.stop(timeout=0.2)
+                except Exception:
+                    pass
+            store = getattr(self, "session_store", None)
+            if store is not None:
+                try:
+                    store.close()
+                except Exception:
+                    pass
+            self.session_store = None
+            self.conversation_tracker = None
+            self.context_builder = None
+            self.summary_worker = None
+            self._last_observation = None
+            if not getattr(self, "_storage_warning_shown", False):
+                self._storage_warning_shown = True
+                _log(f"会话存储已停用 {type(exc).__name__}")
+                self._push(
+                    "applyStorageWarning:",
+                    f"会话记录暂不可用 · {type(exc).__name__} · 已改用屏幕上下文")
 
     @objc.python_method
     def _observe_snapshot(self, chat_title: str, msgs):
@@ -2153,9 +2170,9 @@ def warn_if_no_generation_key() -> None:
 
     OPENAI_* and ANTHROPIC_* are two ways to configure the same generation layer, so this
     fires only when NEITHER is set: either one on its own is a complete configuration.
-    A packaged build also carries a shared default (src/builtin.py), so this dialog only
-    appears when that default was deliberately emptied out. TypeSafe is not checked — it
-    has a local fallback, so it is never missing, only different.
+    This repository ships no shared generation credential, so the dialog appears until
+    the user configures a provider or explicitly disables generation. TypeSafe is not
+    checked — it has a local fallback, so it is never missing, only different.
 
     Drawn with osascript rather than NSAlert, which was measured to not work here: an
     accessory app cannot activate itself (NSApp.isActive stays False after

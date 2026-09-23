@@ -30,6 +30,7 @@ import urllib.error
 import userconfig
 from emotions import (
     EMOTIONS,
+    EMOTION_CHOICE_CRITERIA,
     EMOTION_INTENSITY_LEVELS,
     EMOTION_TRENDS,
     normalize_emotion_fields,
@@ -75,7 +76,7 @@ class JevJudge:
                 "emotion": {
                     "type": "choice",
                     "instructions": "结合完整会话，最新消息的主情绪是什么？",
-                    "criteria": EMOTIONS,
+                    "criteria": EMOTION_CHOICE_CRITERIA,
                 },
                 "emotion_intensity": {
                     "type": "score",

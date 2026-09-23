@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 sys.path.insert(0, str(ROOT / 'tests'))
 from test_settings import Server, SettingsNetwork
+from conversation_store import ConversationStore
 import userconfig
 from settings import SettingsController
 
@@ -54,8 +55,10 @@ try:
     with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True), patch.object(userconfig, '_startup_sources', None), patch.object(userconfig, 'env_files', return_value=[Path(directory) / 'env']), patch.object(userconfig, 'PROJECT_ENV', Path(directory) / '.env'):
         path = Path(directory) / 'env'
         path.write_text('# keep\nJEV_TONES="名字=说明"\n')
+        store = ConversationStore(Path(directory) / 'sessions.sqlite3')
+        store.resolve_session('设置窗口测试')
         userconfig.load()
-        c = SettingsController.alloc().init().build()
+        c = SettingsController.alloc().init().build(session_store=store)
         c.show()
         jev = c.fields['TYPESAFE']
         jev['API_KEY'].setStringValue_('test-jev-key')
@@ -93,6 +96,12 @@ try:
         assert path.stat().st_mode & 0o777 == 0o600
         assert not userconfig.get('OPENAI_API_KEY'), 'must not hot reload'
         assert not c.changed()
+        c.select_mode('sessions')
+        assert c.session_pane.table.numberOfRows() == 1
+        c.window.close()
+        c.show('sessions')
+        assert c.window.isVisible(), 'closed settings window should be reusable'
+        c.select_mode('models')
         for index, name in enumerate(('jev', 'openai', 'anthropic')):
             c.tabs.selectTabViewItemAtIndex_(index)
             A.NSRunLoop.currentRunLoop().runUntilDate_(
@@ -101,15 +110,21 @@ try:
             if name == 'openai':
                 render_window(c, '/tmp/jev-settings-smoke.png')
         c.window.close()
-        reopened = SettingsController.alloc().init().build()
+        reopened = SettingsController.alloc().init().build(
+            session_store=store)
         assert reopened.fields['OPENAI']['MODEL'].stringValue() == 'typed-model'
         # Existing keychain expression remains byte-for-byte when editing only the model.
         path.write_text('export OPENAI_API_KEY="$(security find-generic-password -w)" # keep expression\nOPENAI_MODEL=old\n')
-        shell = SettingsController.alloc().init().build()
+        shell = SettingsController.alloc().init().build(session_store=store)
         shell.fields['OPENAI']['MODEL'].setStringValue_('new-model')
         shell.save_button.performClick_(None)
         assert 'export OPENAI_API_KEY="$(security find-generic-password -w)" # keep expression\n' in path.read_text()
         assert shell.fields['OPENAI']['API_KEY'].stringValue() == ''
-        print('PASS: native buttons, async completion, models/manual entry, HTTP failure, secure save, restart isolation, reopen, shell-expression preservation')
+        reopened.window.close()
+        shell.window.close()
+        store.close()
+        c.session_pane.refresh()
+        assert '暂不可用' in c.session_pane.status.stringValue()
+        print('PASS: native buttons, async completion, models/manual entry, HTTP failure, secure save, restart isolation, session mode, window reuse, closed-database handling, shell-expression preservation')
 finally:
     SettingsNetwork.tearDownClass()

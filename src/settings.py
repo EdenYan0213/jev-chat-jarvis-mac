@@ -22,7 +22,8 @@ PALETTE = ui_style.PALETTE
 
 class SettingsController(NSObject):
     @objc.python_method
-    def build(self, session_store=None, initial_mode="models",
+    def build(self, session_store=None, session_lock=None,
+              initial_mode="models",
               on_session_change=None):
         self.path = userconfig.env_files()[0]
         self.original = config.read_document(self.path)
@@ -143,6 +144,7 @@ class SettingsController(NSObject):
             self.session_store,
             NSMakeRect(0, 0, 760, 596),
             on_change=on_session_change,
+            operation_lock=session_lock,
         )
         self.session_pane.view.setHidden_(True)
         view.addSubview_(self.session_pane.view)
@@ -261,6 +263,12 @@ class SettingsController(NSObject):
             self.select_mode(mode)
         self.window.makeKeyAndOrderFront_(None)
         A.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+
+    @objc.python_method
+    def close_resources(self):
+        if self.owns_session_store and self.session_store is not None:
+            self.session_store.close()
+            self.session_store = None
 
     @objc.python_method
     def values(self, prefix):
@@ -396,3 +404,4 @@ if __name__ == "__main__":
     controller = SettingsController.alloc().init().build()
     controller.show()
     app.run()
+    controller.close_resources()
