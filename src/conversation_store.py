@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import os
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import time
@@ -14,8 +15,12 @@ import uuid
 APP_SUPPORT_DIR = (
     Path.home() / "Library" / "Application Support" / "jev-jarvis")
 DEFAULT_DB_PATH = APP_SUPPORT_DIR / "conversations.sqlite3"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 VALID_SIDES = {"them", "me", "unknown"}
+LEGACY_UNNAMED_CHAT = "未命名聊天"
+LEGACY_UNNAMED_ARCHIVE = "未命名聊天（旧混合记录）"
+GROUP_COUNT_SUFFIX = re.compile(
+    r"(?:\s*[（(]\s*\d*\s*[）)]?|\s*[\u2460-\u2473\u24ea])\s*$")
 
 
 @dataclass(frozen=True)
@@ -53,7 +58,14 @@ class StoredMessage:
 
 
 def normalize_chat_key(value: str) -> str:
-    return " ".join(str(value or "").split()) or "未命名聊天"
+    return " ".join(str(value or "").split()) or LEGACY_UNNAMED_CHAT
+
+
+def chat_identity_base(value: str) -> str:
+    """Ignore OCR-fragile group member counts at the end of a title."""
+    normalized = normalize_chat_key(value)
+    base = GROUP_COUNT_SUFFIX.sub("", normalized).strip()
+    return base or normalized
 
 
 class ConversationStore:
@@ -80,6 +92,7 @@ class ConversationStore:
                 self._db.execute("PRAGMA journal_mode = WAL")
                 self._db.execute("PRAGMA synchronous = NORMAL")
             self._migrate()
+            self._consolidate_chat_aliases()
         if not self._memory:
             os.chmod(self.path, 0o600)
 
@@ -144,6 +157,37 @@ class ConversationStore:
                     PRAGMA user_version = 1;
                 """)
             version = 1
+        if version == 1:
+            with self._db:
+                binding = self._db.execute(
+                    """SELECT active_session_id, updated_at
+                         FROM chat_bindings
+                        WHERE chat_key = ?""",
+                    (LEGACY_UNNAMED_CHAT,)).fetchone()
+                self._db.execute(
+                    "DELETE FROM chat_bindings WHERE chat_key IN (?, ?)",
+                    (LEGACY_UNNAMED_CHAT, LEGACY_UNNAMED_ARCHIVE))
+                self._db.execute(
+                    """UPDATE sessions
+                          SET chat_key = ?,
+                              name = replace(name, ?, ?)
+                        WHERE chat_key = ?""",
+                    (LEGACY_UNNAMED_ARCHIVE,
+                     LEGACY_UNNAMED_CHAT,
+                     LEGACY_UNNAMED_ARCHIVE,
+                     LEGACY_UNNAMED_CHAT))
+                if binding is not None and self._db.execute(
+                        "SELECT 1 FROM sessions WHERE id = ?",
+                        (binding["active_session_id"],)).fetchone():
+                    self._db.execute(
+                        """INSERT INTO chat_bindings (
+                               chat_key, active_session_id, updated_at
+                           ) VALUES (?, ?, ?)""",
+                        (LEGACY_UNNAMED_ARCHIVE,
+                         binding["active_session_id"],
+                         binding["updated_at"]))
+                self._db.execute("PRAGMA user_version = 2")
+            version = 2
         if version != SCHEMA_VERSION:
             raise RuntimeError(
                 f"failed to migrate conversation database to {SCHEMA_VERSION}")
@@ -226,9 +270,88 @@ class ConversationStore:
                    updated_at = excluded.updated_at""",
             (chat_key, session_id, timestamp))
 
+    def _chat_key_stats(self) -> list[sqlite3.Row]:
+        return self._db.execute(
+            """SELECT
+                   s.chat_key,
+                   count(m.id) AS message_count,
+                   min(s.created_at) AS first_created
+                 FROM sessions s
+                 LEFT JOIN messages m ON m.session_id = s.id
+                GROUP BY s.chat_key"""
+        ).fetchall()
+
+    @staticmethod
+    def _preferred_chat_key(rows: list[sqlite3.Row]) -> str:
+        preferred = max(
+            rows,
+            key=lambda row: (
+                int(row["message_count"]),
+                -float(row["first_created"]),
+                -len(str(row["chat_key"])),
+            ),
+        )
+        return str(preferred["chat_key"])
+
+    def _consolidate_chat_aliases(self) -> None:
+        """Fold OCR variants such as 小海（9 / 小海（ / 小海② into one chat."""
+        groups: dict[str, list[sqlite3.Row]] = {}
+        for row in self._chat_key_stats():
+            groups.setdefault(
+                chat_identity_base(row["chat_key"]), []).append(row)
+
+        with self._db:
+            for base, rows in groups.items():
+                if len(rows) < 2 or not any(
+                        str(row["chat_key"]) != base for row in rows):
+                    continue
+                keys = [str(row["chat_key"]) for row in rows]
+                canonical = self._preferred_chat_key(rows)
+                placeholders = ",".join("?" for _ in keys)
+                bindings = self._db.execute(
+                    f"""SELECT active_session_id, updated_at
+                          FROM chat_bindings
+                         WHERE chat_key IN ({placeholders})
+                         ORDER BY updated_at DESC""",
+                    keys,
+                ).fetchall()
+                self._db.execute(
+                    f"""UPDATE sessions
+                           SET chat_key = ?
+                         WHERE chat_key IN ({placeholders})""",
+                    [canonical, *keys],
+                )
+                self._db.execute(
+                    f"""DELETE FROM chat_bindings
+                         WHERE chat_key IN ({placeholders})""",
+                    keys,
+                )
+                if bindings:
+                    self._bind(
+                        canonical,
+                        bindings[0]["active_session_id"],
+                        float(bindings[0]["updated_at"]),
+                    )
+
+    def _resolve_chat_key(self, chat_title: str) -> str:
+        candidate = normalize_chat_key(chat_title)
+        rows = self._chat_key_stats()
+        base = chat_identity_base(candidate)
+        matches = [
+            row for row in rows
+            if chat_identity_base(row["chat_key"]) == base
+        ]
+        if matches:
+            return self._preferred_chat_key(matches)
+        return candidate
+
+    def resolve_chat_key(self, chat_title: str) -> str:
+        with self._lock:
+            return self._resolve_chat_key(chat_title)
+
     def resolve_session(self, chat_title: str) -> SessionRecord:
-        chat_key = normalize_chat_key(chat_title)
         with self._lock, self._db:
+            chat_key = self._resolve_chat_key(chat_title)
             row = self._db.execute(
                 """SELECT s.*
                      FROM chat_bindings b
@@ -241,14 +364,14 @@ class ConversationStore:
 
     def create_session(self, chat_title: str,
                        name: str | None = None) -> SessionRecord:
-        chat_key = normalize_chat_key(chat_title)
         with self._lock, self._db:
+            chat_key = self._resolve_chat_key(chat_title)
             return self._insert_session(
                 chat_key, name, float(self._now()))
 
     def active_session(self, chat_title: str) -> SessionRecord | None:
-        chat_key = normalize_chat_key(chat_title)
         with self._lock:
+            chat_key = self._resolve_chat_key(chat_title)
             row = self._db.execute(
                 """SELECT s.*
                      FROM chat_bindings b
@@ -267,16 +390,16 @@ class ConversationStore:
                       include_deleted: bool = False) -> list[SessionRecord]:
         clauses = []
         params: list = []
-        if chat_title is not None:
-            clauses.append("chat_key = ?")
-            params.append(normalize_chat_key(chat_title))
-        if not include_deleted:
-            clauses.append("deleted_at IS NULL")
-        query = "SELECT * FROM sessions"
-        if clauses:
-            query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY chat_key COLLATE NOCASE, created_at, rowid"
         with self._lock:
+            if chat_title is not None:
+                clauses.append("chat_key = ?")
+                params.append(self._resolve_chat_key(chat_title))
+            if not include_deleted:
+                clauses.append("deleted_at IS NULL")
+            query = "SELECT * FROM sessions"
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            query += " ORDER BY chat_key COLLATE NOCASE, created_at, rowid"
             return [
                 self._session(row)
                 for row in self._db.execute(query, params).fetchall()
@@ -319,9 +442,9 @@ class ConversationStore:
 
     def set_active_session(self, chat_title: str,
                            session_id: str) -> SessionRecord:
-        chat_key = normalize_chat_key(chat_title)
         timestamp = float(self._now())
         with self._lock, self._db:
+            chat_key = self._resolve_chat_key(chat_title)
             row = self._fetch_session(session_id)
             if row is None:
                 raise KeyError(f"active session not found: {session_id}")

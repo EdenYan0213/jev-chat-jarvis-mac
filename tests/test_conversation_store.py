@@ -10,7 +10,12 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from conversation_store import ConversationStore, MessageInput
+from conversation_store import (
+    chat_identity_base,
+    ConversationStore,
+    LEGACY_UNNAMED_ARCHIVE,
+    MessageInput,
+)
 
 
 class ConversationStoreTests(unittest.TestCase):
@@ -30,7 +35,7 @@ class ConversationStoreTests(unittest.TestCase):
                 row[0] for row in db.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table'")
             }
-        self.assertEqual(version, 1)
+        self.assertEqual(version, 2)
         self.assertTrue({"sessions", "messages", "chat_bindings"} <= tables)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.path.parent.stat().st_mode & 0o077, 0)
@@ -58,6 +63,78 @@ class ConversationStoreTests(unittest.TestCase):
         other = self.store.resolve_session("Bob")
         with self.assertRaises(ValueError):
             self.store.set_active_session("Alice", other.id)
+
+    def test_truncated_group_count_resolves_to_existing_chat(self):
+        existing = self.store.resolve_session("小海（9")
+
+        for variant in ("小海（", "小海", "小海②"):
+            resolved = self.store.resolve_session(variant)
+            self.assertEqual(resolved.id, existing.id)
+            self.assertEqual(
+                self.store.resolve_chat_key(variant), "小海（9")
+
+        self.assertEqual(chat_identity_base("小海②"), "小海")
+
+    def test_existing_ocr_aliases_are_consolidated_without_losing_sessions(self):
+        first = self.store.resolve_session("小海（9")
+        self.store.append_messages(
+            first.id, [MessageInput("them", None, "old")])
+        self.store.close()
+        timestamp = self.clock[0] + 10
+        alias_id = "alias-session"
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                """INSERT INTO sessions (
+                       id, chat_key, name, created_at, updated_at, last_active_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (alias_id, "小海②", "小海② · 2026-09-23",
+                 timestamp, timestamp, timestamp))
+            db.execute(
+                """INSERT INTO messages (
+                       session_id, ordinal, side, sender, text,
+                       observed_at, segment_id
+                   ) VALUES (?, 1, 'them', NULL, 'new', ?, 'alias')""",
+                (alias_id, timestamp))
+            db.execute(
+                """INSERT INTO chat_bindings (
+                       chat_key, active_session_id, updated_at
+                   ) VALUES (?, ?, ?)""",
+                ("小海②", alias_id, timestamp))
+            db.commit()
+
+        reopened = ConversationStore(
+            self.path, now=lambda: self.clock[0])
+        self.store = reopened
+        self.addCleanup(reopened.close)
+
+        sessions = reopened.list_sessions("小海")
+        self.assertEqual({row.id for row in sessions}, {first.id, alias_id})
+        self.assertEqual(
+            {row.chat_key for row in sessions}, {"小海（9"})
+        self.assertEqual(
+            reopened.active_session("小海").id, alias_id)
+        self.assertEqual(
+            sum(reopened.message_count(row.id) for row in sessions), 2)
+
+    def test_v1_unnamed_history_is_archived_without_deletion(self):
+        path = Path(self.tempdir.name) / "legacy.sqlite3"
+        legacy = ConversationStore(path, now=lambda: self.clock[0])
+        session = legacy.resolve_session("未命名聊天")
+        legacy.append_messages(
+            session.id, [MessageInput("them", None, "mixed")])
+        legacy.close()
+        with sqlite3.connect(path) as db:
+            db.execute("PRAGMA user_version = 1")
+            db.commit()
+
+        migrated = ConversationStore(path, now=lambda: self.clock[0])
+        self.addCleanup(migrated.close)
+
+        rows = migrated.list_sessions(include_deleted=True)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].chat_key, LEGACY_UNNAMED_ARCHIVE)
+        self.assertIn("旧混合记录", rows[0].name)
+        self.assertEqual(migrated.message_count(rows[0].id), 1)
 
     def test_change_token_tracks_sessions_messages_and_names(self):
         original = self.store.change_token()

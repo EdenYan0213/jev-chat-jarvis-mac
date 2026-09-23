@@ -11,6 +11,7 @@ Validated facts this module is built on (probed 2026-09-21 on WeChat 4.1 Mac):
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import tempfile
@@ -35,6 +36,7 @@ MIN_CONF = 0.30
 USERNAME_H_MAX = 0.026   # sender-name lines render smaller than bubble text
 MESSAGE_H_MIN = 0.028
 MIN_TEXT_LEN = 1
+TITLE_TEXT_RE = re.compile(r"[0-9A-Za-z\u3400-\u9fff]")
 
 
 @dataclass
@@ -372,22 +374,73 @@ def extract_chat_title(blocks: list[TextBlock]) -> str:
     Two rows live up there: the title itself and (when a chat is collapsed) a
     "folded chats" banner. We take the topmost readable band and drop the banner.
     """
-    cands = [b for b in blocks
-             if b.x >= CHAT_PANE_X_MIN and b.y > TITLE_BAR_Y_MAX
-             and b.conf >= 0.30 and len(b.text) >= 2 and not _is_noise(b)]
+    cands = [
+        b for b in blocks
+        if CHAT_PANE_X_MIN + 0.035 <= b.x < 0.88
+        and b.y > TITLE_BAR_Y_MAX
+        and b.conf >= 0.25
+        and TITLE_TEXT_RE.search(b.text)
+        and not _is_noise(b)
+    ]
     if not cands:
         return ""
-    cands.sort(key=lambda b: (-b.y, -len(b.text)))
-    top_y = cands[0].y
-    band = [b for b in cands if top_y - b.y < 0.03]
-    # the header also contains the chat-info / call / menu glyphs, which OCR turns into
-    # short junk. The conversation name is by far the longest run of text up there.
-    longest = max(band, key=lambda b: len(b.text))
-    if len(longest.text) < 4:
-        return ""
-    keep = sorted((b for b in band if len(b.text) >= len(longest.text) * 0.5),
-                  key=lambda b: b.x)
-    return " ".join(b.text for b in keep).strip()
+    # The title is left-aligned just inside the chat pane. Short names are valid; the
+    # previous four-character minimum discarded names such as "小海" and sent every one
+    # of those chats into the same unnamed Session.
+    anchor = min(cands, key=lambda b: (b.x, -len(b.text), -b.conf))
+    band = sorted(
+        (b for b in cands if abs(b.y - anchor.y) < 0.025),
+        key=lambda b: b.x,
+    )
+    keep = []
+    right = None
+    for block in band:
+        if block.x + 0.005 < anchor.x:
+            continue
+        if right is not None and block.x - right > 0.045:
+            break
+        keep.append(block.text.strip())
+        right = max(right or block.x_right, block.x_right)
+    return " ".join(text for text in keep if text).strip()
+
+
+def _title_signature(image) -> str | None:
+    """Hash only the visual title band for chats whose title OCR is unavailable."""
+    if image is None:
+        return None
+    import ctypes
+
+    try:
+        width = Quartz.CGImageGetWidth(image)
+        height = Quartz.CGImageGetHeight(image)
+        crop = Quartz.CGImageCreateWithImageInRect(
+            image,
+            Quartz.CGRectMake(
+                int(0.35 * width), 0,
+                int(0.50 * width), int(0.12 * height)))
+        thumb_w, thumb_h = 128, 24
+        buf = ctypes.create_string_buffer(thumb_w * thumb_h)
+        ctx = Quartz.CGBitmapContextCreate(
+            buf, thumb_w, thumb_h, 8, thumb_w,
+            Quartz.CGColorSpaceCreateDeviceGray(),
+            Quartz.kCGImageAlphaNone)
+        Quartz.CGContextDrawImage(
+            ctx, Quartz.CGRectMake(0, 0, thumb_w, thumb_h), crop)
+        quantized = bytes((value // 16) * 16 for value in buf.raw)
+        return hashlib.blake2s(quantized, digest_size=5).hexdigest()
+    except Exception:
+        return None
+
+
+def chat_key_for_snapshot(chat_title: str, window_id: int,
+                          title_signature: str | None) -> str:
+    title = " ".join(str(chat_title or "").split())
+    if title:
+        return title
+    seed = f"{int(window_id)}:{title_signature or 'no-title'}"
+    token = hashlib.blake2s(
+        seed.encode("utf-8"), digest_size=4).hexdigest().upper()
+    return f"未命名聊天 · {token}"
 
 
 def message_side(x: float, width: float) -> str:
@@ -558,10 +611,15 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
             t_ocr = time.perf_counter()
 
     msgs = extract_messages(blocks, max_messages=max_messages)
+    chat_title = extract_chat_title(blocks)
+    chat_key = chat_key_for_snapshot(
+        chat_title, win.wid,
+        _title_signature(image) if not chat_title else None)
     return {
         "ok": True,
         "unchanged": False,
-        "chat_title": extract_chat_title(blocks),
+        "chat_title": chat_title,
+        "chat_key": chat_key,
         "window": window,
         "messages": msgs,
         "timing_ms": {"capture": (t_cap - t0) * 1000, "ocr": (t_ocr - t_cap) * 1000,

@@ -1429,7 +1429,9 @@ class HudController(NSObject):
             res = self._last_full
         else:
             self._last_full = res
-            self._push("applyChat:", res.get("chat_title") or "")
+            self._push(
+                "applyChat:",
+                res.get("chat_key") or res.get("chat_title") or "")
 
         res = dict(res, window=live_window)
         # AX traversal stays on the read worker, never the Cocoa drawing thread.
@@ -1446,10 +1448,17 @@ class HudController(NSObject):
             self._input_window = dict(res["window"])
             self._input_next = now_input + 1.0
         msgs = res["messages"]
+        snapshot_chat_key = (
+            res.get("chat_key") or res.get("chat_title") or "")
         if fresh_snapshot:
             self._last_observation = self._observe_snapshot(
-                res.get("chat_title") or "", msgs)
+                snapshot_chat_key, msgs)
         observation = self._last_observation
+        resolved_chat_key = (
+            observation.session.chat_key
+            if observation is not None else snapshot_chat_key)
+        if observation is not None and resolved_chat_key != snapshot_chat_key:
+            self._push("applyChat:", resolved_chat_key)
         thems = [m for m in msgs if m.side == "them"]
         newest = thems[-1] if thems else None
         prev_text = thems[-2].text if len(thems) > 1 else ""
@@ -1463,7 +1472,7 @@ class HudController(NSObject):
                     if message is newest:
                         target_message_id = observation.visible_ids[index]
                         break
-        key = ((res.get("chat_title") or "", session_id, newest.text)
+        key = ((resolved_chat_key, session_id, newest.text)
                if newest else None)
         if key != self._reply_key:
             self._reply_epoch += 1
@@ -2015,6 +2024,12 @@ class HudController(NSObject):
     # --- main-thread callbacks (AppKit is not thread safe)
     def applyChat_(self, title):
         chat_key = normalize_chat_key(title)
+        store = getattr(self, "session_store", None)
+        if store is not None:
+            try:
+                chat_key = store.resolve_chat_key(chat_key)
+            except Exception:
+                pass
         self._chat_title = chat_key
         self._render("chat", chat_key, PALETTE["accent"])
         self.rows["chat"].setToolTip_(chat_key)
