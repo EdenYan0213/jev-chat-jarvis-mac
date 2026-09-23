@@ -99,24 +99,28 @@ class JevJudge:
 
     def rank_candidates(self, message: str, intent: str,
                         candidates: list[str]) -> list[dict]:
-        """Rank reply candidates — just another `choice` question with the texts as options."""
+        """Keep option labels short for local classifiers with a bounded question head."""
         if not candidates:
             return []
+        options = {f"reply_{i + 1}": text for i, text in enumerate(candidates)}
+        candidate_context = "\n".join(
+            f"{label}: {text}" for label, text in options.items())
         payload = {
             "model": self.model,
-            "state": f"收到的消息：{message}\n判断出的意图：{intent}",
+            "state": (f"收到的消息：{message}\n判断出的意图：{intent}"
+                      f"\n候选回复：\n{candidate_context}"),
             "questions": {"best": {"type": "choice",
-                                   "instructions": "哪一条回复最合适？",
-                                   "criteria": {c: None for c in candidates}}},
+                                   "instructions": "选择最合适的候选回复编号。",
+                                   "criteria": {label: None for label in options}}},
         }
         data = self._post(payload)
         ans = ((data.get("answers") or {}).get("best") or {})
         probs = ans.get("probabilities") or {}
         ranked = []
-        for c in candidates:
-            p = probs.get(c)
+        for label, c in options.items():
+            p = probs.get(label)
             if p is None:                      # gateway may echo the chosen label only
-                p = ans.get("confidence", 0.0) if ans.get("choice") == c else 0.0
+                p = ans.get("confidence", 0.0) if ans.get("choice") == label else 0.0
             ranked.append({"text": c, "prob": float(p)})
         ranked.sort(key=lambda r: -r["prob"])
         return ranked

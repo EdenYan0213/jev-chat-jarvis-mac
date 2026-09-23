@@ -70,7 +70,8 @@ userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inheri
 from perception import (  # noqa: E402
     read_conversation, screen_capture_ok, request_screen_capture, warm_ocr)
 from judge import make_judge  # noqa: E402
-from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
+from generate import (BUILTIN_SOURCE, Generator, generation_enabled,
+                      load_credentials)  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
 import ui_style  # noqa: E402
@@ -190,13 +191,16 @@ class HudController(NSObject):
         self._read_once = False        # first OCR call includes Vision's own load
         self._last_skip_reason = None
         self.judge = make_judge()
-        self.generator = Generator()
+        # A local model may need more than 30 seconds for its first cold load.
+        self.generator = Generator(timeout=90)
         # 话术: per-slot tone selection. A slot on 不用 contributes no request and no rows,
         # so the panel is exactly as tall as the groups actually in use.
         self.slot_tones = list(styles.DEFAULT_SLOTS) + [styles.NONE_LABEL]
         self.slot_tones = self.slot_tones[:styles.MAX_SLOTS]
         while len(self.slot_tones) < styles.MAX_SLOTS:
             self.slot_tones.append(styles.NONE_LABEL)
+        if not generation_enabled():
+            self.slot_tones = [styles.NONE_LABEL] * styles.MAX_SLOTS
         self._dds: list = []
         self._dd_boxes: list = []       # the flat fields the dropdowns are drawn into
         self._group_boxes: list = []    # translucent surfaces behind active tone groups
@@ -243,7 +247,9 @@ class HudController(NSObject):
         self._stable_n = 0                   # consecutive unchanged reads since last change
         self._collapsed = False
         self._expanded_h = None       # full height, captured the first time we collapse
-        self._paused = False
+        self._paused = not bool(
+            load_credentials()[1]
+            or userconfig.get("TYPESAFE_API_KEY", "JEV_API_KEY"))
         # YOLO overlay default: JEV_BOXES=1 (or true/yes/on) in the env file starts it on;
         # either way the menu-bar item flips it at runtime
         self._show_boxes = userconfig.get("JEV_BOXES").strip().lower() in (
@@ -604,6 +610,7 @@ class HudController(NSObject):
         for item in menu.itemArray():
             item.setTarget_(self)
         self.pause_item = menu.itemArray()[1]
+        self.pause_item.setTitle_("继续读屏" if self._paused else "暂停读屏")
         self.boxes_item = menu.itemArray()[2]
         self.boxes_item.setState_(
             AppKit.NSOnState if self._show_boxes else AppKit.NSOffState)
@@ -928,7 +935,8 @@ class HudController(NSObject):
             self._render("status", "没选话术 · 至少选一个", PALETTE["amber"])
             return
         self._render("status", f"换话术中…（{'、'.join(active)}）", PALETTE["muted"])
-        self._set_candidate_header("候选回复 · 生成中…")
+        self._set_candidate_header(
+            "候选回复 · 生成中…" if generation_enabled() else "候选回复 · 已关闭")
         threading.Thread(target=self._reply_task,
                          args=(self._reply_epoch, self._regen_work,
                                text, self._last_intent, list(self.slot_tones)),
@@ -1566,6 +1574,8 @@ class HudController(NSObject):
         if not self._reply_current():
             return
         groups = gen.get("groups") or []
+        if gen.get("disabled"):
+            return
         failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
         _log(f"生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms{note} · {len(groups)} 个话术并发"
              f" → {sum(len(g['texts']) for g in groups)} 条候选"
@@ -1699,7 +1709,8 @@ class HudController(NSObject):
         if hasattr(self, "_risk_dots"):
             self._set_risk_scale(risk)
         self._render("actions", " · ".join(v.get("actions", [])), PALETTE["text"])
-        self._set_candidate_header("候选回复 · 生成中…")
+        self._set_candidate_header(
+            "候选回复 · 生成中…" if generation_enabled() else "候选回复 · 已关闭")
         # the verdict landing starts a new candidate run: without this reset, the streamed
         # line counters left over from the previous message would eat every new line
         # (applyStreamLine_ drops rows beyond PER_TONE) — only applyPending_ and
@@ -1873,7 +1884,7 @@ def warn_if_no_generation_key() -> None:
     loop, i.e. an app that looks hung. osascript's dialog belongs to a process that can
     activate, and Popen does not wait, so a dialog nobody dismisses cannot stall us.
     """
-    if load_credentials()[1]:
+    if not generation_enabled() or load_credentials()[1]:
         return
     path = str(userconfig.ENV_FILE).replace(str(Path.home()), "~")
     # AppleScript string escapes (\n) work inside the literal; keep it free of double quotes

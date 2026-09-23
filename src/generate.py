@@ -50,6 +50,11 @@ MISSING_HINT = ("未配置生成层 Key：候选回复需要它，判断/风险�
 BUILTIN_SOURCE = "内置默认"
 
 
+def generation_enabled() -> bool:
+    return userconfig.get("JEV_GENERATION_ENABLED").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
 class _KeepAlivePool:
     """std 库 keep-alive 连接池：按 (scheme, host, port) 复用 http.client 连接。
 
@@ -342,7 +347,12 @@ class Generator:
         accepts `stream: true` but answers with plain JSON anyway, the response is parsed
         the old way — streaming degrades, it does not fail.
         """
+        if not generation_enabled():
+            raise RuntimeError("Reply generation is disabled.")
         base, key, model, _src, api = load_credentials()
+        if not key:
+            raise RuntimeError(
+                "Configure your own model credentials before generating replies.")
         # the constructor's overrides win — without this the `model` argument was accepted
         # and silently ignored, so the request went out with whatever the config named
         if self.model_override:
@@ -533,6 +543,8 @@ class Generator:
         completes — streaming's early look, before the full result is in. Callers that do
         not pass it get exactly the old collect-then-return behaviour.
         """
+        if not generation_enabled():
+            return {"groups": [], "disabled": True, "elapsed_s": 0.0}
         slots = list(slot_tones or (styles.DEFAULT_SLOTS + [styles.NONE_LABEL]))
         active = [(i, t) for i, t in enumerate(slots) if t in styles.PRESETS]
         if not active:
