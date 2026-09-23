@@ -1470,7 +1470,9 @@ class HudController(NSObject):
             if newest is not None and len(observation.visible_ids) == len(msgs):
                 for index, message in enumerate(msgs):
                     if message is newest:
-                        target_message_id = observation.visible_ids[index]
+                        visible_id = observation.visible_ids[index]
+                        if visible_id is not None:
+                            target_message_id = visible_id
                         break
         key = ((resolved_chat_key, session_id, newest.text)
                if newest else None)

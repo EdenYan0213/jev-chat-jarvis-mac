@@ -34,6 +34,10 @@ def me(text):
     return Visible(text=text, side="me")
 
 
+def unknown(text):
+    return Visible(text=text, side="unknown")
+
+
 class ConversationContextTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -83,6 +87,38 @@ class ConversationContextTests(unittest.TestCase):
             older.visible_ids,
             (first.appended[0].id, first.appended[1].id))
         self.assertEqual(self.store.message_count(first.session.id), 4)
+
+    def test_sender_drift_and_unknown_side_do_not_duplicate_snapshot(self):
+        first = self.tracker.observe(
+            "Alice", [them("A", sender="15:00|"), me("B")])
+
+        again = self.tracker.observe(
+            "Alice", [unknown("A"), me("B")])
+
+        self.assertEqual(again.appended, ())
+        self.assertEqual(again.visible_ids, tuple(
+            message.id for message in first.appended))
+        self.assertEqual(self.store.message_count(first.session.id), 2)
+
+    def test_mid_snapshot_overlap_appends_only_the_new_tail(self):
+        first = self.tracker.observe(
+            "Alice", [them("A"), me("B"), me("C"), them("D")])
+
+        shifted = self.tracker.observe(
+            "Alice", [unknown("A B"), me("C"), them("D"), me("E")])
+
+        self.assertEqual(
+            [message.text for message in shifted.appended], ["E"])
+        self.assertEqual(shifted.visible_ids, (
+            None,
+            first.appended[2].id,
+            first.appended[3].id,
+            shifted.appended[0].id,
+        ))
+        self.assertEqual(
+            [message.text for message in self.store.recent_messages(
+                first.session.id)],
+            ["A", "B", "C", "D", "E"])
 
     def test_no_overlap_creates_new_segment_and_marks_gap(self):
         first = self.tracker.observe("Alice", [them("A"), me("B")])

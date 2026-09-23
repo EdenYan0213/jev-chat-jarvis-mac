@@ -25,7 +25,7 @@ SUMMARY_INPUT_LIMIT = 8_000
 @dataclass(frozen=True)
 class Observation:
     session: SessionRecord
-    visible_ids: tuple[int, ...]
+    visible_ids: tuple[int | None, ...]
     appended: tuple[StoredMessage, ...]
     gap_detected: bool
 
@@ -60,12 +60,54 @@ def _message_input(message) -> MessageInput:
     return MessageInput(side=side, sender=sender or None, text=text)
 
 
+def _alignment_key(message) -> tuple[str, str]:
+    return str(message.side), _clean_text(message.text)
+
+
+def _alignment_matches(left: tuple[str, str],
+                       right: tuple[str, str]) -> bool:
+    left_side, left_text = left
+    right_side, right_text = right
+    return (
+        left_text == right_text
+        and (
+            left_side == right_side
+            or "unknown" in (left_side, right_side)
+        )
+    )
+
+
+def _sequence_matches(left: list[tuple[str, str]],
+                      right: list[tuple[str, str]]) -> bool:
+    return (
+        len(left) == len(right)
+        and all(
+            _alignment_matches(a, b)
+            for a, b in zip(left, right)
+        )
+    )
+
+
 def _latest_subsequence(haystack: list[tuple], needle: list[tuple]) -> int | None:
     if not needle or len(needle) > len(haystack):
         return None
     for start in range(len(haystack) - len(needle), -1, -1):
-        if haystack[start:start + len(needle)] == needle:
+        if _sequence_matches(
+                haystack[start:start + len(needle)], needle):
             return start
+    return None
+
+
+def _suffix_overlap(haystack: list[tuple], needle: list[tuple]
+                    ) -> tuple[int, int] | None:
+    """Find the longest history suffix occurring anywhere in the visible snapshot."""
+    max_size = min(len(haystack), len(needle))
+    for size in range(max_size, 0, -1):
+        suffix = haystack[-size:]
+        for start in range(len(needle) - size, -1, -1):
+            if _sequence_matches(
+                    suffix, needle[start:start + size]):
+                return size, start
     return None
 
 
@@ -84,10 +126,10 @@ class ConversationTracker:
         if not visible:
             return Observation(session, (), (), False)
 
-        visible_keys = [message_key(message) for message in visible]
+        visible_keys = [_alignment_key(message) for message in visible]
         recent = self.store.recent_messages(
             session.id, limit=self.alignment_limit)
-        recent_keys = [message_key(message) for message in recent]
+        recent_keys = [_alignment_key(message) for message in recent]
 
         existing_start = _latest_subsequence(recent_keys, visible_keys)
         if existing_start is not None:
@@ -97,19 +139,19 @@ class ConversationTracker:
                     existing_start:existing_start + len(visible)])
             return Observation(session, ids, (), False)
 
-        overlap = 0
-        max_overlap = min(len(recent), len(visible))
-        for size in range(max_overlap, 0, -1):
-            if recent_keys[-size:] == visible_keys[:size]:
-                overlap = size
-                break
-
-        if overlap:
+        overlap = _suffix_overlap(recent_keys, visible_keys)
+        if overlap is not None:
+            overlap_size, visible_start = overlap
             appended = self.store.append_messages(
                 session.id,
-                [_message_input(message) for message in visible[overlap:]])
+                [
+                    _message_input(message)
+                    for message in visible[
+                        visible_start + overlap_size:]
+                ])
             ids = tuple(
-                [message.id for message in recent[-overlap:]]
+                [None] * visible_start
+                + [message.id for message in recent[-overlap_size:]]
                 + [message.id for message in appended])
             return Observation(
                 self.store.get_session(session.id),
