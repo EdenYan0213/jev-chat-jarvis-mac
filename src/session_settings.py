@@ -9,9 +9,9 @@ from typing import Callable
 
 import AppKit as A
 import objc
-from Foundation import NSObject, NSMakeRect
+from Foundation import NSIndexSet, NSObject, NSMakeRect
 
-from conversation_store import ConversationStore, SessionRecord
+from conversation_store import ConversationStore, SessionRecord, StoredMessage
 import ui_style
 
 
@@ -24,10 +24,19 @@ class SessionRow:
     id: str
     chat_key: str
     name: str
+    message_count: int
     updated_at: float
     last_active_at: float
     deleted_at: float | None
     deletes_at: float | None
+
+
+@dataclass(frozen=True)
+class SessionDetail:
+    row: SessionRow
+    summary_text: str
+    has_observation_gap: bool
+    messages: tuple[StoredMessage, ...]
 
 
 class SessionManagerModel:
@@ -46,6 +55,7 @@ class SessionManagerModel:
             id=session.id,
             chat_key=session.chat_key,
             name=session.name,
+            message_count=self.store.message_count(session.id),
             updated_at=session.updated_at,
             last_active_at=session.last_active_at,
             deleted_at=session.deleted_at,
@@ -82,6 +92,17 @@ class SessionManagerModel:
 
     def trash_rows(self, search: str | None = None) -> list[SessionRow]:
         return self._rows(True, search)
+
+    def detail(self, session_id: str) -> SessionDetail:
+        session = self.store.get_session(session_id, include_deleted=True)
+        if session is None:
+            raise KeyError(f"session not found: {session_id}")
+        return SessionDetail(
+            row=self._row(session),
+            summary_text=session.summary_text,
+            has_observation_gap=session.has_observation_gap,
+            messages=tuple(self.store.list_messages(session_id)),
+        )
 
     def rename(self, session_id: str, name: str) -> SessionRow:
         return self._row(self.store.rename_session(session_id, name))
@@ -122,8 +143,8 @@ class SessionManagerPane(NSObject):
             "会话管理", 24, 548, 300, 28, 22, PALETTE["text"], True)
         title.setAccessibilityRoleDescription_("会话管理")
         self._label(
-            "本地保存双方可见消息；回收站中的会话会在 30 天后自动清理。",
-            24, 522, 520, 20, 11, PALETTE["muted"])
+            "显示所有聊天的 Session 和双方消息；回收站内容会在 30 天后自动清理。",
+            24, 522, 620, 20, 11, PALETTE["muted"])
 
         self.search = A.NSSearchField.alloc().initWithFrame_(
             NSMakeRect(24, 482, 410, 30))
@@ -147,7 +168,7 @@ class SessionManagerPane(NSObject):
         self.view.addSubview_(self.mode)
 
         self.table = A.NSTableView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, 696, 360))
+            NSMakeRect(0, 0, 310, 360))
         self.table.setDelegate_(self)
         self.table.setDataSource_(self)
         self.table.setRowHeight_(29)
@@ -156,24 +177,51 @@ class SessionManagerPane(NSObject):
         self.table.setTarget_(self)
         self.table.setDoubleAction_("renameSelected:")
         for identifier, label, width in (
-            ("name", "会话", 250),
-            ("chat", "聊天", 190),
-            ("updated", "最近更新", 130),
-            ("deletes", "自动清理", 120),
+            ("chat", "聊天", 118),
+            ("name", "Session", 132),
+            ("count", "消息", 52),
         ):
             column = A.NSTableColumn.alloc().initWithIdentifier_(identifier)
             column.headerCell().setStringValue_(label)
             column.setWidth_(width)
-            column.setMinWidth_(80)
+            column.setMinWidth_(44)
             self.table.addTableColumn_(column)
 
         scroll = A.NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(24, 102, 712, 368))
+            NSMakeRect(24, 102, 318, 368))
         scroll.setDocumentView_(self.table)
         scroll.setHasVerticalScroller_(True)
         scroll.setAutohidesScrollers_(True)
         scroll.setBorderType_(A.NSBezelBorder)
         self.view.addSubview_(scroll)
+
+        self.detail_title = self._label(
+            "选择一个 Session", 360, 446, 376, 24, 15,
+            PALETTE["text"], True)
+        self.detail_title.setLineBreakMode_(A.NSLineBreakByTruncatingTail)
+        self.detail_meta = self._label(
+            "左侧列出了本机保存的全部聊天。", 360, 402, 376, 40,
+            11, PALETTE["muted"])
+        self.detail_meta.cell().setWraps_(True)
+
+        self.history = A.NSTextView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 360, 286))
+        self.history.setEditable_(False)
+        self.history.setSelectable_(True)
+        self.history.setRichText_(False)
+        self.history.setFont_(A.NSFont.systemFontOfSize_(12))
+        self.history.setTextColor_(PALETTE["text"])
+        self.history.setBackgroundColor_(PALETTE["field"])
+        self.history.setString_("选择左侧 Session 后，这里会显示摘要和完整消息记录。")
+        self.history.setAccessibilityLabel_("Session 消息记录")
+
+        history_scroll = A.NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(360, 102, 376, 294))
+        history_scroll.setDocumentView_(self.history)
+        history_scroll.setHasVerticalScroller_(True)
+        history_scroll.setAutohidesScrollers_(True)
+        history_scroll.setBorderType_(A.NSBezelBorder)
+        self.view.addSubview_(history_scroll)
 
         self.rename_button = self._button(
             "重命名", "renameSelected:", 24, 54, 112)
@@ -254,6 +302,8 @@ class SessionManagerPane(NSObject):
 
     @objc.python_method
     def refresh(self):
+        selected = self._selected()
+        selected_id = selected.id if selected is not None else None
         search = self.search.stringValue() if hasattr(self, "search") else ""
         try:
             self.rows = (
@@ -266,6 +316,22 @@ class SessionManagerPane(NSObject):
                 self._set_status(
                     "会话数据库暂不可用，请重新打开应用。", True)
         self.table.reloadData()
+        if self.rows:
+            index = next(
+                (i for i, row in enumerate(self.rows)
+                 if row.id == selected_id),
+                0,
+            )
+            self.table.selectRowIndexes_byExtendingSelection_(
+                NSIndexSet.indexSetWithIndex_(index), False)
+            self.table.scrollRowToVisible_(index)
+            self._show_detail(self.rows[index])
+        else:
+            self.table.deselectAll_(None)
+            self._clear_detail(
+                "回收站中没有 Session。"
+                if self.showing_trash else
+                "没有匹配的 Session。")
         self.rename_button.setHidden_(self.showing_trash)
         self.trash_button.setHidden_(self.showing_trash)
         self.restore_button.setHidden_(not self.showing_trash)
@@ -280,6 +346,61 @@ class SessionManagerPane(NSObject):
                 self.restore_button, self.delete_button):
             button.setEnabled_(selected)
 
+    @objc.python_method
+    def _clear_detail(self, message: str):
+        self.detail_title.setStringValue_("没有可显示的 Session")
+        self.detail_meta.setStringValue_("")
+        self.history.setString_(message)
+
+    @staticmethod
+    def _speaker(message: StoredMessage) -> str:
+        if message.side == "me":
+            return "我"
+        if message.side == "them":
+            return message.sender or "对方"
+        return message.sender or "方向未确认"
+
+    @classmethod
+    def _history_text(cls, detail: SessionDetail) -> str:
+        summary = detail.summary_text.strip() or "尚未生成摘要"
+        parts = ["会话摘要", summary, "", f"消息记录（{len(detail.messages)} 条）"]
+        if not detail.messages:
+            parts.extend(["", "这个 Session 还没有保存到消息。"])
+        for message in detail.messages:
+            timestamp = datetime.fromtimestamp(
+                message.observed_at).strftime("%Y-%m-%d %H:%M")
+            parts.extend([
+                "",
+                f"{timestamp} · {cls._speaker(message)}",
+                message.text,
+            ])
+        return "\n".join(parts)
+
+    @objc.python_method
+    def _show_detail(self, row: SessionRow):
+        try:
+            detail = self.model.detail(row.id)
+        except sqlite3.Error:
+            self._clear_detail("消息记录暂时无法读取，请重新打开应用。")
+            self._set_status("会话数据库暂不可用，请重新打开应用。", True)
+            return
+        except KeyError:
+            self._clear_detail("这个 Session 已不存在，请刷新后重试。")
+            return
+
+        updated = datetime.fromtimestamp(
+            detail.row.updated_at).strftime("%Y-%m-%d %H:%M")
+        state = "历史可能有识别缺口" if detail.has_observation_gap else "历史连续"
+        if detail.row.deletes_at is not None:
+            state += " · " + datetime.fromtimestamp(
+                detail.row.deletes_at).strftime("%Y-%m-%d 自动清理")
+        self.detail_title.setStringValue_(detail.row.name)
+        self.detail_meta.setStringValue_(
+            f"聊天：{detail.row.chat_key}\n"
+            f"{detail.row.message_count} 条消息 · {updated} 更新 · {state}")
+        self.history.setString_(self._history_text(detail))
+        self.history.scrollToBeginningOfDocument_(None)
+
     def numberOfRowsInTableView_(self, table):
         return len(self.rows)
 
@@ -290,6 +411,8 @@ class SessionManagerPane(NSObject):
             return item.name
         if identifier == "chat":
             return item.chat_key
+        if identifier == "count":
+            return str(item.message_count)
         if identifier == "updated":
             return datetime.fromtimestamp(
                 item.updated_at).strftime("%Y-%m-%d %H:%M")
@@ -300,6 +423,9 @@ class SessionManagerPane(NSObject):
 
     def tableViewSelectionDidChange_(self, notification):
         self._update_buttons()
+        row = self._selected()
+        if row is not None:
+            self._show_detail(row)
 
     def searchChanged_(self, sender):
         self.refresh()

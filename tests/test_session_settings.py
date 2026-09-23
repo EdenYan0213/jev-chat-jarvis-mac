@@ -28,15 +28,45 @@ class SessionManagerModelTests(unittest.TestCase):
     def test_active_rows_search_name_and_chat_case_insensitively(self):
         first = self.store.resolve_session("Alice Team")
         self.store.rename_session(first.id, "客户跟进")
-        self.store.resolve_session("Bob")
+        second = self.store.resolve_session("Bob")
 
         by_chat = self.model.active_rows(search="ALICE")
         by_name = self.model.active_rows(search="客户")
+        all_sessions = self.model.active_rows()
 
         self.assertEqual([row.id for row in by_chat], [first.id])
         self.assertEqual([row.id for row in by_name], [first.id])
+        self.assertEqual(
+            {row.id for row in all_sessions}, {first.id, second.id})
         self.assertIsNone(by_name[0].deleted_at)
         self.assertIsNone(by_name[0].deletes_at)
+
+    def test_detail_returns_summary_gap_and_complete_message_history(self):
+        session = self.store.resolve_session("Alice")
+        messages = self.store.append_messages(session.id, [
+            MessageInput("them", "Alice", "第一条"),
+            MessageInput("me", None, "第二条"),
+            MessageInput("unknown", None, "第三条"),
+        ])
+        self.store.update_summary(
+            session.id, "这是摘要", messages[1].id)
+        self.store.mark_observation_gap(session.id)
+
+        detail = self.model.detail(session.id)
+
+        self.assertEqual(detail.row.chat_key, "Alice")
+        self.assertEqual(detail.row.message_count, 3)
+        self.assertEqual(detail.summary_text, "这是摘要")
+        self.assertTrue(detail.has_observation_gap)
+        self.assertEqual(
+            [(message.side, message.sender, message.text)
+             for message in detail.messages],
+            [
+                ("them", "Alice", "第一条"),
+                ("me", None, "第二条"),
+                ("unknown", None, "第三条"),
+            ],
+        )
 
     def test_rename_trash_restore_and_scheduled_deletion(self):
         session = self.store.resolve_session("Alice")

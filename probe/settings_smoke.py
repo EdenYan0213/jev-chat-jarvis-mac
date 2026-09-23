@@ -13,13 +13,13 @@ from unittest.mock import patch
 
 import AppKit as A
 import Quartz
-from Foundation import NSDate
+from Foundation import NSDate, NSIndexSet
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 sys.path.insert(0, str(ROOT / 'tests'))
 from test_settings import Server, SettingsNetwork
-from conversation_store import ConversationStore
+from conversation_store import ConversationStore, MessageInput
 import userconfig
 from settings import SettingsController
 
@@ -56,7 +56,12 @@ try:
         path = Path(directory) / 'env'
         path.write_text('# keep\nJEV_TONES="名字=说明"\n')
         store = ConversationStore(Path(directory) / 'sessions.sqlite3')
-        store.resolve_session('设置窗口测试')
+        first_session = store.resolve_session('设置窗口测试')
+        store.append_messages(first_session.id, [
+            MessageInput('them', '测试用户', '这是一条对方消息'),
+            MessageInput('me', None, '这是一条我的消息'),
+        ])
+        store.resolve_session('另一个聊天')
         userconfig.load()
         c = SettingsController.alloc().init().build(session_store=store)
         c.show()
@@ -97,7 +102,18 @@ try:
         assert not userconfig.get('OPENAI_API_KEY'), 'must not hot reload'
         assert not c.changed()
         c.select_mode('sessions')
-        assert c.session_pane.table.numberOfRows() == 1
+        assert c.session_pane.table.numberOfRows() == 2
+        first_index = next(
+            index for index, row in enumerate(c.session_pane.rows)
+            if row.id == first_session.id)
+        c.session_pane.table.selectRowIndexes_byExtendingSelection_(
+            NSIndexSet.indexSetWithIndex_(first_index), False)
+        assert '消息记录（2 条）' in c.session_pane.history.string()
+        assert '测试用户' in c.session_pane.history.string()
+        assert '这是一条我的消息' in c.session_pane.history.string()
+        A.NSRunLoop.currentRunLoop().runUntilDate_(
+            NSDate.dateWithTimeIntervalSinceNow_(0.1))
+        render_window(c, '/tmp/jev-settings-sessions.png')
         c.window.close()
         c.show('sessions')
         assert c.window.isVisible(), 'closed settings window should be reusable'
