@@ -6,29 +6,9 @@
 
 ![演示：微信群消息进来 → 面板给出意图、风险分级与候选回复 → 点「填入」直接进微信输入框](docs/demo.gif)
 
-## 交流反馈
+## 反馈与帮助
 
-**先自查：[常见问题解答（FAQ）](docs/FAQ.md)——配置文件、日志、本地模型的路径与查看命令速查。**
-
-用着有问题、想提需求、想一起改，扫码进群（**1 群已满，从 2 群开始扫，满了顺序换下一个**）；群二维码 7 天失效，过期了在 issue 说一声：
-
-<table>
-  <tr>
-    <td align="center"><img src="docs/wechat-group-2.png" width="200" alt="扫码加入微信交流群 2 群"><br><sub>2 群</sub></td>
-    <td align="center"><img src="docs/wechat-group-3.png" width="200" alt="扫码加入微信交流群 3 群"><br><sub>3 群</sub></td>
-    <td align="center"><img src="docs/wechat-group-4.png" width="200" alt="扫码加入微信交流群 4 群"><br><sub>4 群</sub></td>
-    <td align="center"><img src="docs/wechat-group-5.png" width="200" alt="扫码加入微信交流群 5 群"><br><sub>5 群</sub></td>
-  </tr>
-</table>
-
-都满了或者不想进群，直接找我：加个人微信（备注来意），或关注公众号后台私信：
-
-<table>
-  <tr>
-    <td align="center"><img src="docs/wechat-personal.png" width="200" alt="扫码加个人微信"><br><sub>个人微信</sub></td>
-    <td align="center"><img src="docs/wechat-mp-qr.png" width="200" alt="扫码关注公众号"><br><sub>公众号</sub></td>
-  </tr>
-</table>
+**先自查：[常见问题解答（FAQ）](docs/FAQ.md)——配置文件、日志、模型路径、安装报错、旧版空白面板速查。** 交流群、公众号等联系方式见文末[「交流反馈」](#交流反馈)；数据流向与隐私见 [PRIVACY.md](PRIVACY.md)。
 
 ## 它能做什么
 
@@ -41,7 +21,7 @@
 
 面板使用 macOS 原生浅色磨砂材质：顶部是当前聊天、分析状态、正在处理的消息与上下文；中间依次显示意图、识别率、风险等级和行动建议；底部按话术分组展示候选回复。当前风险圆点会轻微呼吸提示。每条候选左侧是本地排序概率，右侧仍只有「复制」和「填入」；候选行会随完整文字自动增高，不截断内容，发送始终由用户在微信里手动完成。
 
-「不用」的话术槽只保留一行下拉选择，不生成也不占候选行；开启或关闭话术只改变面板高度，不改变判断与轮询流程。黄色窗口按钮收起到聊天名与状态，红色窗口按钮退出。
+面板默认开三组话术：**高情商话术、贴吧老哥 v1.0、阴阳怪气**，每个下拉可换成其余语气或「不用」；「不用」的话术槽只保留一行下拉选择，不生成也不占候选行；开启或关闭话术只改变面板高度，不改变判断与轮询流程。黄色窗口按钮收起到聊天名与状态，红色窗口按钮退出。
 
 ## 用法
 
@@ -166,5 +146,27 @@ chmod 600 ~/.config/jev-jarvis/env
 ## 许可与免责
 
 MIT（见 `LICENSE`）。只读**你自己屏幕上、你自己账号的**聊天内容，不注入、不 hook、不解密数据库、不自动发送任何消息。请在自己设备上自用；装到别人机器上读别人的聊天记录是另一回事，本项目不为那种用法背书。微信改版可能导致布局识别失效，请遵守微信软件许可协议。
+
+## 交流反馈
+
+用着有问题、想提需求、想一起改，扫码进群（**1 群已满，从 2 群开始扫，满了顺序换下一个**）；**有新版本发布会在群里和公众号通知，建议关注**；群二维码 7 天失效，过期了在 issue 说一声：
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/wechat-group-2.png" width="200" alt="扫码加入微信交流群 2 群"><br><sub>2 群</sub></td>
+    <td align="center"><img src="docs/wechat-group-3.png" width="200" alt="扫码加入微信交流群 3 群"><br><sub>3 群</sub></td>
+    <td align="center"><img src="docs/wechat-group-4.png" width="200" alt="扫码加入微信交流群 4 群"><br><sub>4 群</sub></td>
+    <td align="center"><img src="docs/wechat-group-5.png" width="200" alt="扫码加入微信交流群 5 群"><br><sub>5 群</sub></td>
+  </tr>
+</table>
+
+都满了或者不想进群，直接找我：加个人微信（备注来意），或关注公众号后台私信（新版本发布同样在公众号通知）：
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/wechat-personal.png" width="200" alt="扫码加个人微信"><br><sub>个人微信</sub></td>
+    <td align="center"><img src="docs/wechat-mp-qr.png" width="200" alt="扫码关注公众号"><br><sub>公众号</sub></td>
+  </tr>
+</table>
 
 **隐私与数据流向**详见 [PRIVACY.md](PRIVACY.md)：聊天内容只发给模型服务商——推荐自配 API key 或本地 Ollama；内置免费通道经作者中转，承诺与提醒见该页。

@@ -80,8 +80,10 @@ BUILTIN: dict[str, str] = {
     ),
 }
 
-# What the panel starts with: two tones, not three — a third slot defaults to 不用.
-DEFAULT_SLOTS: list[str] = ["高情商话术", "贴吧老哥 v1.0"]
+# What the panel starts with. The third slot used to default to 不用; users were found
+# opening it and picking 阴阳怪气 by hand every session, so the default now ships it on —
+# hud.py caps the list at MAX_SLOTS, so this can grow without touching the panel build.
+DEFAULT_SLOTS: list[str] = ["高情商话术", "贴吧老哥 v1.0", "阴阳怪气"]
 NONE_LABEL = "不用"          # the third dropdown's way of saying "only two candidates"
 
 CUSTOM_VAR = "JEV_TONES"     # env var holding user-defined tones

@@ -43,6 +43,10 @@ sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app
 
 `.app` 改过名（如「jev-jarvis 2.app」）就把命令里的路径换成实际名字。装好后首次启动还需授予「屏幕录制」与「辅助功能」权限，详见 README[「只想用」](../README.md#只想用)一节。
 
+## 启动后悬浮窗一片空白、没有任何提示？
+
+这是**旧版本**的现象：新版本首次启动会弹出判断方式引导，模型下载/加载期间面板状态行有实时进度（如「下载判断模型 34% · 1.2/3.8 GB」），失败也有红字说明。遇到一片白先确认版本，**推荐更新到[最新版](https://github.com/jev-chat/jev-chat-jarvis-mac/releases/latest)**。新版本发布会在微信群与公众号通知，入口见 README 文末[「交流反馈」](../README.md#交流反馈)，建议关注以便第一时间收到更新。
+
 ## 还有问题？
 
-先看 README[「已知限制」](../README.md#已知限制)与[置顶 issue](../../issues)；带上下文日志（打码后）开新 issue。
+先看 README[「已知限制」](../README.md#已知限制)与[置顶 issue](../../issues)；带上下文日志（打码后）开新 issue。数据收集与隐私说明：[PRIVACY.md](../PRIVACY.md)。
