@@ -210,10 +210,20 @@ class HudController(NSObject):
             self.session_store = ConversationStore()
             self.session_store.purge_expired()
             self.conversation_tracker = ConversationTracker(self.session_store)
-            self.context_builder = ContextBuilder(self.session_store)
+            shared_model = bool(getattr(
+                self.judge, "shares_generation_model", False))
+            context_options = (
+                {"soft_limit": 4_000, "hard_limit": 6_000,
+                 "recent_count": 16}
+                if shared_model else {}
+            )
+            self.context_builder = ContextBuilder(
+                self.session_store, **context_options)
             self.summary_worker = SummaryWorker(
                 self.session_store,
                 Generator(timeout=90),
+                soft_limit=context_options.get("soft_limit", 8_000),
+                recent_count=context_options.get("recent_count", 20),
                 interactive_busy=lambda: bool(
                     getattr(self, "_analyzing", False)
                     or getattr(self, "_prejudging", False)
@@ -464,7 +474,7 @@ class HudController(NSObject):
             pop.setBordered_(False)          # <- no bezel, no accent-coloured chevron
             # the one discoverability aid the flat field gets: grey-on-grey reads as text,
             # a tooltip costs nothing visually and answers "can I click this?"
-            pop.setToolTip_("点这里换话术（每种一组，各出 2 条）")
+            pop.setToolTip_("点这里换话术（每种一组，各出 1 条）")
             pop.setFont_(NSFont.boldSystemFontOfSize_(TONE_DD_FONT))
             pop.setContentTintColor_(PALETTE["text"])
             pop.addItemsWithTitles_(tone_items)
@@ -1497,19 +1507,25 @@ class HudController(NSObject):
             _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
                  f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）"
                  f"{note}{slow_cap}")
-            _log(f"新消息 · 预判+生成先跑，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
+            shared_model = bool(getattr(
+                self.judge, "shares_generation_model", False))
+            mode = ("停稳后用共享模型判断+生成"
+                    if shared_model else "预判+生成先跑")
+            _log(f"新消息 · {mode}，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
                  f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
             # latest-wins: overwrite the slot, retire the old verdict — only the newest
             # text's judgment can ever be consumed, and only by the settle gate below
-            self._prejudge_req = (newest.text, context,
-                                  newest.sender, prev_text, self._reply_epoch)
             self._prejudge_result = None
-            self._prejudge_event.set()
+            if shared_model:
+                self._prejudge_req = None
+            else:
+                self._prejudge_req = (
+                    newest.text, context, newest.sender, prev_text,
+                    self._reply_epoch)
+                self._prejudge_event.set()
             # same discipline for the generation half: fire now, supersede on the next
             # arrival, spend at settle. Tones are captured here — a dropdown click during
             # the window invalidates the result at consumption time (checked in _take_pregen)
-            shared_model = bool(getattr(
-                self.judge, "shares_generation_model", False))
             self._pregen_req = None if shared_model else (
                 newest.text, context, tuple(self.slot_tones), self._reply_epoch)
             self._pregen_result = None
@@ -1577,6 +1593,15 @@ class HudController(NSObject):
             self._push("applyError:", f"分析失败: {type(e).__name__}: {str(e)[:40]}")
         finally:
             self._analyzing = False
+            keep_warm = getattr(self.judge, "keep_warm", None)
+            if callable(keep_warm):
+                def refresh_keepalive():
+                    try:
+                        keep_warm()
+                    except Exception as exc:
+                        _log(f"保持判断模型驻留失败 {type(exc).__name__}")
+                threading.Thread(
+                    target=refresh_keepalive, daemon=True).start()
 
     @objc.python_method
     def _prejudge_loop(self):
@@ -2195,12 +2220,17 @@ class HudController(NSObject):
             _log("预热 OCR 失败 · 首次读屏会稍慢，不影响使用")
 
         try:
-            self.judge.warm()
+            warmed = self.judge.warm()
         except Exception as e:
             _log(f"预热判断模型失败 {type(e).__name__}: {str(e)[:60]}")
         else:
-            self._judged_once = True  # same: the load is paid, the first judge is steady-state
-            _log(f"预热 判断模型就绪 · 总耗时 {(time.perf_counter() - t0) * 1000:.0f}ms")
+            if warmed is False:
+                _log("判断模型按需加载 · 空闲卸载后首条消息会包含 Ollama 冷启动")
+            else:
+                # The load is paid, so the first real judgment is steady-state.
+                self._judged_once = True
+                _log(f"预热 判断模型就绪 · 总耗时 "
+                     f"{(time.perf_counter() - t0) * 1000:.0f}ms")
 
 
 def warn_if_no_generation_key() -> None:
@@ -2255,9 +2285,8 @@ def main() -> None:
          + ("（内置默认）" if _src == BUILTIN_SOURCE else "")
          + (" · YOLO 框开" if controller._show_boxes else ""))
     controller._show()
-    # Warm the heavy one-off loads (Vision OCR, judge model) while the panel is idle, so
-    # the user's first message pays only steady-state costs. With TypeSafe Jev configured
-    # warm() is a no-op — the network path has nothing to load.
+    # Warm heavy one-off loads while the panel is idle. Local Ollama stays resident for a
+    # bounded period; remote judgment backends have nothing to load.
     threading.Thread(target=controller._warm, daemon=True).start()
     timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
         FAST_TICK, controller, "tick:", None, True)

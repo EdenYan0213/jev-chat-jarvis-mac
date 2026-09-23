@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 
 import userconfig
 from emotions import (
@@ -19,8 +20,9 @@ from judge import ACTION_MAP, INTENTS
 DEFAULT_BASE = "http://127.0.0.1:11434/v1"
 DEFAULT_MODEL = "qwen3.5:4b"
 TIMEOUT = 90
-MAX_CONTEXT_CHARS = 12_000
-CONTEXT_HEAD_CHARS = 4_000
+MAX_CONTEXT_CHARS = 6_000
+CONTEXT_HEAD_CHARS = 2_000
+OLLAMA_KEEP_ALIVE = "30m"
 
 
 def configured() -> bool:
@@ -106,30 +108,26 @@ class OpenAIJudge:
 
     def judge(self, message: str, context: str | None = None) -> dict:
         context = _bounded_context((context or "").strip())
-        prompt = {
-            "conversation_context": context or "无",
-            "latest_message": message,
-            "intent_options": INTENTS,
-            "emotion_options": EMOTIONS,
-            "emotion_trend_options": EMOTION_TRENDS,
-            "task": (
-                "判断最新消息的意图、直接回复风险、主情绪、情绪强度和相对趋势。"
-                "只依据对话，不补充事实。risk 为 0 到 9，emotion_intensity 为 0 到 4。"
-            ),
-            "output_schema": {
-                "intent": "必须是 intent_options 的一个键",
-                "confidence": "0 到 1",
-                "risk": "0 到 9",
-                "emotion": "必须是 emotion_options 的一个键",
-                "emotion_confidence": "0 到 1",
-                "emotion_intensity": "0 到 4",
-                "emotion_trend": "必须是 emotion_trend_options 的一个键",
-            },
-        }
+        intents = "；".join(f"{name}={desc}" for name, desc in INTENTS.items())
+        emotions = "；".join(
+            f"{name}={desc}" for name, desc in EMOTIONS.items())
+        trends = "；".join(
+            f"{name}={desc}" for name, desc in EMOTION_TRENDS.items())
+        prompt = (
+            f"结合完整对话判断最后一句。\n"
+            f"意图定义：{intents}\n"
+            f"情绪定义：{emotions}\n"
+            f"趋势定义：{trends}\n"
+            f"对话：{context or '无'}\n"
+            f"最后一句：{message}\n"
+            "只输出 JSON："
+            '{"i":"意图名","c":0到100,"r":0到9,"e":"情绪名",'
+            '"ec":0到100,"s":0到4,"t":"趋势名"}。'
+        )
         body = {
             "model": self.model,
-            "max_tokens": 320,
-            "temperature": 0.1,
+            "max_tokens": 120,
+            "temperature": 0,
             "stream": False,
             "response_format": {"type": "json_object"},
             "messages": [
@@ -137,12 +135,12 @@ class OpenAIJudge:
                     "role": "system",
                     "content": (
                         "你是 OpenJev 风格的结构化判断器。"
-                        "不要解释推理过程，只输出一个符合要求的 JSON 对象。"
+                        "只输出合法 JSON，不解释，不补充事实。"
                     ),
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(prompt, ensure_ascii=False),
+                    "content": prompt,
                 },
             ],
         }
@@ -154,19 +152,33 @@ class OpenAIJudge:
         content = ((choices[0].get("message") or {}).get("content") or "")
         result = _json_object(content)
 
-        intent = _choice(result.get("intent"), INTENTS, "闲聊")
-        confidence = _number(result.get("confidence"), 0.0, 0.0, 1.0)
-        risk = _number(result.get("risk"), 0.0, 0.0, 9.0)
-        emotion = _choice(result.get("emotion"), EMOTIONS, "平静")
+        intent = _choice(
+            result.get("i", result.get("intent")), INTENTS, "闲聊")
+        confidence = _number(
+            result.get("c", result.get("confidence")), 0.0, 0.0, 1.0)
+        risk = _number(
+            result.get("r", result.get("risk")), 0.0, 0.0, 9.0)
+        emotion = _choice(
+            result.get("e", result.get("emotion")), EMOTIONS, "平静")
         trend = _choice(
-            result.get("emotion_trend"), EMOTION_TRENDS, "稳定")
+            result.get("t", result.get("emotion_trend")),
+            EMOTION_TRENDS,
+            "稳定",
+        )
         emotion_fields = normalize_emotion_fields(
             emotion=emotion,
             confidence=_number(
-                result.get("emotion_confidence"), 0.0, 0.0, 1.0),
+                result.get("ec", result.get("emotion_confidence")),
+                0.0,
+                0.0,
+                1.0,
+            ),
             intensity=_number(
-                result.get("emotion_intensity"), 0.0, 0.0,
-                float(len(EMOTION_INTENSITY_LEVELS) - 1)),
+                result.get("s", result.get("emotion_intensity")),
+                0.0,
+                0.0,
+                float(len(EMOTION_INTENSITY_LEVELS) - 1),
+            ),
             trend=trend,
         )
         return {
@@ -204,5 +216,40 @@ class OpenAIJudge:
             self.timeout,
         )
 
-    def warm(self) -> None:
-        return None
+    def _ollama_generate_url(self) -> str:
+        parsed = urllib.parse.urlsplit(self.base)
+        if (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+            and parsed.port == 11434
+            and parsed.path.rstrip("/") in {"", "/v1"}
+        ):
+            return urllib.parse.urlunsplit(
+                (parsed.scheme, parsed.netloc, "/api/generate", "", ""))
+        return ""
+
+    def keep_warm(self) -> bool:
+        url = self._ollama_generate_url()
+        if not url:
+            return False
+        http_post_json(
+            url,
+            {"content-type": "application/json"},
+            {
+                "model": self.model,
+                "prompt": "",
+                "stream": False,
+                "keep_alive": OLLAMA_KEEP_ALIVE,
+            },
+            self.timeout,
+        )
+        return True
+
+    def warm(self) -> bool:
+        if not self.keep_warm():
+            return False
+        try:
+            self.judge("预热", context="无")
+        finally:
+            self.keep_warm()
+        return True

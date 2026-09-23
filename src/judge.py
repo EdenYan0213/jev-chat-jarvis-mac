@@ -110,7 +110,7 @@ class Judge:
                              for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
             self._loaded = True
 
-    def warm(self) -> None:
+    def warm(self) -> bool:
         """Load the model and run one real-shaped forward, so no real message pays for it.
 
         decider-2b's first load costs 9-15 s and lands inside whichever judge() call gets
@@ -122,6 +122,7 @@ class Judge:
         with self._load_lock:
             self._load()
             self.judge("预热")
+        return True
 
     def _slot_probs(self, logits_by_slot: list, n_options: int, slot: int) -> np.ndarray:
         logits = logits_by_slot[slot]
@@ -299,8 +300,8 @@ class FallbackJudge:
                 self.reason = f"{type(e).__name__}: {str(e)[:80]}"
         return self._fallback().rank_candidates(message, intent, candidates)
 
-    def warm(self) -> None:
-        return None
+    def warm(self) -> bool:
+        return False
 
 
 def make_judge():

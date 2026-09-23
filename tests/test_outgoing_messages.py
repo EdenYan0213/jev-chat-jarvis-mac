@@ -166,12 +166,13 @@ class OutgoingTests(unittest.TestCase):
         self.flush()
         self.h.applyIncoming_.assert_called_once()
 
-    def test_shared_judge_model_defers_generation_until_after_judgment(self):
+    def test_shared_judge_model_defers_all_llm_work_until_settle(self):
         self.h.judge.shares_generation_model = True
 
         self.incoming()
 
-        self.assertIsNotNone(self.h._prejudge_req)
+        self.assertIsNone(self.h._prejudge_req)
+        self.assertFalse(self.h._prejudge_event.is_set())
         self.assertIsNone(self.h._pregen_req)
         self.assertFalse(self.h._pregen_event.is_set())
 

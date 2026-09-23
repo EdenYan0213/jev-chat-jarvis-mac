@@ -19,12 +19,10 @@ import userconfig
 # dropdowns; the panel's candidate area is built for this many rows.
 MAX_SLOTS = 3
 
-# Candidates per tone. Each tone gets its own request (they run concurrently), and the 2
-# replies in one response are the same voice at two different levels of nerve: the first
-# stays sendable as-is, the second leans into the persona (see PROMPT_ONE in generate.py).
-# A tone asked for twice in one prompt tends to bleed into itself, which is why one tone
-# equals one request.
-PER_TONE = 2
+# Candidates per tone. Local Ollama serves one request at a time by default, so one concise
+# candidate per selected voice keeps the panel responsive while still giving distinct
+# choices across slots.
+PER_TONE = 1
 
 # label -> instruction. Order here is the order shown in the dropdowns.
 #
@@ -85,8 +83,8 @@ BUILTIN: dict[str, str] = {
     ),
 }
 
-# What the panel starts with: two tones, not three — a third slot defaults to 不用.
-DEFAULT_SLOTS: list[str] = ["高情商话术", "贴吧老哥 v1.0"]
+# What the panel starts with: two useful voices, one candidate each.
+DEFAULT_SLOTS: list[str] = ["高情商话术", "暖心阳光男孩"]
 NONE_LABEL = "不用"          # the third dropdown's way of saying "only two candidates"
 
 CUSTOM_VAR = "JEV_TONES"     # env var holding user-defined tones

@@ -147,23 +147,17 @@ class ThinkingOnlyError(Exception):
 THINKING_ONLY_HINT = ("思考型 {model}：额度被思考耗尽，正文 0 条；"
                       "换非思考模型（如 {alt}）")
 
-# One request per tone. {n} appears twice on purpose: the "exactly n lines" demand has to
-# agree with the count asked for, or the model pads the answer with a line of its own.
-#
-# The boldness line is what gives a tone its edges. Without it both replies sit at the same
-# safe distance and every tone reads a bit flat; with it the first is always something you
-# could send as-is and the second is where the persona gets to breathe. Measured on the
-# built-in tones: 卑微乙方's pair goes from two polite apologies to "收到收到…" plus
-# "您息怒我马上跪着改完给您磕头了", and 贴吧老哥 picks up "我自己看了都想删号".
+# One request per tone. {n} appears twice on purpose: the exact-line demand has to agree
+# with the count asked for, or the model pads the answer with a line of its own.
 PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
 
 {context_line}消息：「{message}」
 {intent_line}
-请写 {n} 条回复候选，语气统一成下面这一种，但两条的胆量要有差别：
+请写 {n} 条回复候选，语气统一成下面这一种：
 「{tone}」{instruction}
 
 硬性要求：
-- 前一条稳妥、可以直接发出去；后一条把这个语气做足，更皮、更夸张一点也行
+- 稳妥、贴合上下文，可以直接发出去，不编造事实或承诺
 - 每条不超过 30 个字，是微信里打字的语气，不要客套话、不要解释
 - 只输出 {n} 行，每行一条，不要编号、不要引号、不要任何前后缀
 - 不要写出语气名称（不要写「{tone}：」这类前缀），直接从回复内容开始"""
@@ -527,7 +521,11 @@ class Generator:
                         on_line(text)
 
         try:
-            raw = self._call(prompt, on_delta if on_line is not None else None)
+            raw = self._call(
+                prompt,
+                on_delta if on_line is not None else None,
+                max_tokens=120,
+            )
         except ThinkingOnlyError as e:
             return [], str(e)            # already panel-ready: model named, fix suggested
         except urllib.error.HTTPError as e:
