@@ -4,13 +4,19 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from conversation_context import ContextBuilder, ConversationTracker
+from conversation_context import (
+    ContextBuilder,
+    ConversationTracker,
+    SummaryWorker,
+)
 from conversation_store import ConversationStore, MessageInput
+from generate import Generator
 
 
 @dataclass
@@ -167,6 +173,110 @@ class ConversationContextTests(unittest.TestCase):
         self.assertNotIn("message-2", rendered.text)
         self.assertTrue(rendered.truncated)
         self.assertGreaterEqual(rendered.message_count, 3)
+
+
+class GeneratorSummaryTests(unittest.TestCase):
+    def test_summary_request_uses_low_temperature_and_retention_prompt(self):
+        generator = Generator()
+        generator._call = Mock(return_value="  更新后的摘要  ")
+
+        result = generator.summarize(
+            "Alice 在等待确认。", "Alice: 明天下午能给吗\n我: 可以")
+
+        self.assertEqual(result, "更新后的摘要")
+        prompt = generator._call.call_args.args[0]
+        self.assertIn("Alice 在等待确认。", prompt)
+        self.assertIn("Alice: 明天下午能给吗", prompt)
+        self.assertIn("人物关系", prompt)
+        self.assertIn("未解决问题", prompt)
+        self.assertEqual(
+            generator._call.call_args.kwargs,
+            {"max_tokens": 800, "temperature": 0.2})
+
+
+class SummaryWorkerTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.store = ConversationStore(
+            Path(self.tempdir.name) / "conversations.sqlite3")
+        self.addCleanup(self.store.close)
+        self.session = self.store.resolve_session("Alice")
+
+    def add_messages(self, count, width=40):
+        return self.store.append_messages(self.session.id, [
+            MessageInput(
+                "them" if index % 2 == 0 else "me",
+                "Alice" if index % 2 == 0 else None,
+                f"message-{index}-" + "x" * width,
+            )
+            for index in range(count)
+        ])
+
+    def test_below_threshold_does_not_call_summarizer(self):
+        self.add_messages(4, width=5)
+        summarizer = Mock()
+        worker = SummaryWorker(
+            self.store, summarizer, soft_limit=10_000, recent_count=2)
+
+        self.assertFalse(worker.run_once(self.session.id))
+        summarizer.summarize.assert_not_called()
+
+    def test_success_advances_boundary_but_keeps_recent_raw(self):
+        messages = self.add_messages(7)
+        summarizer = Mock()
+        summarizer.summarize.return_value = "压缩后的摘要"
+        worker = SummaryWorker(
+            self.store, summarizer, soft_limit=100, recent_count=2)
+
+        self.assertTrue(worker.run_once(self.session.id))
+
+        updated = self.store.get_session(self.session.id)
+        self.assertEqual(updated.summary_text, "压缩后的摘要")
+        self.assertEqual(updated.summary_until_message_id, messages[-3].id)
+        self.assertEqual(
+            [message.id for message in self.store.list_messages(
+                self.session.id,
+                after_id=updated.summary_until_message_id)],
+            [messages[-2].id, messages[-1].id])
+        prompt_messages = summarizer.summarize.call_args.args[1]
+        self.assertIn("message-0", prompt_messages)
+        self.assertIn("message-4", prompt_messages)
+        self.assertNotIn("message-5", prompt_messages)
+
+    def test_failure_keeps_previous_summary_and_boundary(self):
+        messages = self.add_messages(8)
+        self.store.update_summary(
+            self.session.id, "旧摘要", messages[1].id)
+        summarizer = Mock()
+        summarizer.summarize.side_effect = RuntimeError("offline")
+        logs = []
+        worker = SummaryWorker(
+            self.store, summarizer, soft_limit=100, recent_count=2,
+            logger=logs.append)
+
+        self.assertFalse(worker.run_once(self.session.id))
+
+        unchanged = self.store.get_session(self.session.id)
+        self.assertEqual(unchanged.summary_text, "旧摘要")
+        self.assertEqual(
+            unchanged.summary_until_message_id, messages[1].id)
+        self.assertEqual(len(logs), 1)
+        self.assertNotIn("message-", logs[0])
+
+    def test_interactive_generation_defers_summary(self):
+        self.add_messages(7)
+        summarizer = Mock()
+        worker = SummaryWorker(
+            self.store, summarizer, soft_limit=100, recent_count=2,
+            interactive_busy=lambda: True)
+
+        self.assertFalse(worker.run_once(self.session.id))
+        summarizer.summarize.assert_not_called()
+        self.assertEqual(
+            self.store.get_session(
+                self.session.id).summary_until_message_id,
+            None)
 
 
 if __name__ == "__main__":

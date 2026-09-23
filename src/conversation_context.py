@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import queue
+import threading
+import time
 from typing import Iterable
 
 from conversation_store import (
@@ -16,6 +19,7 @@ DEFAULT_SOFT_LIMIT = 8_000
 DEFAULT_HARD_LIMIT = 12_000
 DEFAULT_RECENT_COUNT = 20
 RECENT_ALIGNMENT_LIMIT = 100
+SUMMARY_INPUT_LIMIT = 8_000
 
 
 @dataclass(frozen=True)
@@ -223,3 +227,114 @@ class ContextBuilder:
             source_chars=source_chars,
             truncated=truncated,
         )
+
+
+class SummaryWorker:
+    """Low-priority rolling summaries with a synchronous core for tests."""
+
+    def __init__(self, store: ConversationStore, summarizer, *,
+                 soft_limit: int = DEFAULT_SOFT_LIMIT,
+                 recent_count: int = DEFAULT_RECENT_COUNT,
+                 input_limit: int = SUMMARY_INPUT_LIMIT,
+                 interactive_busy=None,
+                 logger=None,
+                 retry_delay: float = 0.5):
+        self.store = store
+        self.summarizer = summarizer
+        self.soft_limit = max(1, int(soft_limit))
+        self.recent_count = max(1, int(recent_count))
+        self.input_limit = max(1, int(input_limit))
+        self.interactive_busy = interactive_busy or (lambda: False)
+        self.logger = logger or (lambda _message: None)
+        self.retry_delay = max(0.01, float(retry_delay))
+        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._pending: set[str] = set()
+        self._pending_lock = threading.Lock()
+        self._stopping = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def needs_summary(self, session_id: str) -> bool:
+        session = self.store.get_session(session_id)
+        if session is None:
+            return False
+        messages = self.store.list_messages(
+            session_id, after_id=session.summary_until_message_id)
+        if len(messages) <= self.recent_count:
+            return False
+        source = _render(
+            session.summary_text.strip(),
+            [_line(message) for message in messages])
+        return len(source) > self.soft_limit
+
+    def run_once(self, session_id: str) -> bool:
+        if self.interactive_busy():
+            return False
+        try:
+            session = self.store.get_session(session_id)
+            if session is None or not self.needs_summary(session_id):
+                return False
+            messages = self.store.list_messages(
+                session_id, after_id=session.summary_until_message_id)
+            candidates = messages[:-self.recent_count]
+            selected = []
+            selected_chars = 0
+            for message in candidates:
+                line = _line(message)
+                added = len(line) + (1 if selected else 0)
+                if selected and selected_chars + added > self.input_limit:
+                    break
+                selected.append(message)
+                selected_chars += added
+            if not selected:
+                return False
+            source = "\n".join(_line(message) for message in selected)
+            summary = self.summarizer.summarize(
+                session.summary_text, source).strip()
+            if not summary:
+                raise ValueError("empty summary")
+            self.store.update_summary(
+                session_id, summary, selected[-1].id, version=1)
+            return True
+        except Exception as exc:
+            self.logger(f"摘要更新失败 {type(exc).__name__}")
+            return False
+
+    def schedule(self, session_id: str) -> None:
+        if not session_id or self._stopping.is_set():
+            return
+        with self._pending_lock:
+            if session_id in self._pending:
+                return
+            self._pending.add(session_id)
+        self._queue.put(session_id)
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stopping.clear()
+        self._thread = threading.Thread(
+            target=self._loop, name="jev-summary", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stopping.set()
+        self._queue.put(None)
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.0, timeout))
+
+    def _loop(self) -> None:
+        while not self._stopping.is_set():
+            session_id = self._queue.get()
+            if session_id is None:
+                return
+            with self._pending_lock:
+                self._pending.discard(session_id)
+            if self.interactive_busy():
+                if self._stopping.wait(self.retry_delay):
+                    return
+                self.schedule(session_id)
+                continue
+            changed = self.run_once(session_id)
+            if changed and self.needs_summary(session_id):
+                self.schedule(session_id)

@@ -166,6 +166,22 @@ PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
 - 只输出 {n} 行，每行一条，不要编号、不要引号、不要任何前后缀
 - 不要写出语气名称（不要写「{tone}：」这类前缀），直接从回复内容开始"""
 
+SUMMARY_PROMPT = """请更新下面这段微信会话摘要。
+
+已有摘要：
+{prior}
+
+新增对话：
+{messages}
+
+要求：
+- 保留人物、人物关系、重要事实、决定、承诺、边界和时间要求
+- 保留未解决问题、待办事项，以及情绪如何变化
+- 区分谁说了什么，不要把双方立场混在一起
+- 不得补充对话里没有的信息
+- 删除寒暄、重复表达和已经失去作用的细节
+- 只输出更新后的摘要，不要标题、解释或 Markdown"""
+
 
 # The model is told not to label its lines, and usually complies — but "usually" is exactly
 # why these exist. Seen for real: "轻松型：" (the intended echo), "轻松的回复：", "轻松版：",
@@ -336,7 +352,8 @@ class Generator:
             self._creds = (base, key, self.model_override or model)
         return self._creds
 
-    def _call(self, prompt: str, on_delta=None) -> str:
+    def _call(self, prompt: str, on_delta=None, *,
+              max_tokens: int = 300, temperature: float = 0.9) -> str:
         """One completion. With `on_delta`, streams: each content fragment is passed to it
         as it arrives, and the full text is still returned at the end (so the caller can
         parse lines once, authoritatively, from the same string).
@@ -365,7 +382,8 @@ class Generator:
         alt = "glm-4-flash" if api == "anthropic" else "deepseek-chat"
         if api == "anthropic":
             url = _endpoint(base, "anthropic")
-            body = {"model": model, "max_tokens": 300, "temperature": 0.9,
+            body = {"model": model, "max_tokens": max_tokens,
+                    "temperature": temperature,
                     "messages": [{"role": "user", "content": prompt}]}
             headers = {"content-type": "application/json", "x-api-key": key,
                        "anthropic-version": "2023-06-01"}
@@ -382,7 +400,8 @@ class Generator:
             return raw
 
         url = _endpoint(base, "openai")
-        body = {"model": model, "max_tokens": 300, "temperature": 0.9,
+        body = {"model": model, "max_tokens": max_tokens,
+                "temperature": temperature,
                 "messages": [{"role": "user", "content": prompt}]}
         body.update(_extra_params())
         headers = {"content-type": "application/json", "authorization": f"Bearer {key}"}
@@ -524,6 +543,14 @@ class Generator:
                 emitted += 1
                 on_line(text)
         return self._parse(raw)[:styles.PER_TONE], ""
+
+    def summarize(self, prior_summary: str, messages: str) -> str:
+        prompt = SUMMARY_PROMPT.format(
+            prior=prior_summary.strip() or "无",
+            messages=messages.strip(),
+        )
+        return self._call(
+            prompt, max_tokens=800, temperature=0.2).strip()
 
     def generate(self, message: str, intent: str = "",
                  slot_tones: list[str] | None = None,
