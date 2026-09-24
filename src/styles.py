@@ -24,6 +24,46 @@ MAX_SLOTS = 3
 # choices across slots.
 PER_TONE = 1
 
+# Careful, context-sensitive voices need less sampling variance than the playful presets.
+# Unlisted tones retain Generator's established 0.9 default.
+TONE_TEMPERATURES: dict[str, float] = {
+    "高情商幽默朋友": 0.35,
+}
+
+TONE_INTENT_GUIDANCE: dict[str, dict[str, str]] = {
+    "高情商幽默朋友": {
+        "批评": (
+            "第一小句必须以「是我……」开头，复述上下文里已经发生的行为；"
+            "第二小句承认这会让对方不舒服；最后只表达「我现在认真听你说」这一类当下关注，"
+            "不描述未经上下文确认的动作。不要用问句，不解释原因，不谈以后。"
+        ),
+        "要解释": "只解释上下文已有的原因；原因不清楚就坦白并问清，不编理由。",
+        "闲聊": (
+            "紧跟对方当下分享的事实和情绪，笑点停在已经发生的事情上；"
+            "明显是成果时，把肯定落在结果和坚持上。回复到此结束，"
+            "不提出任何后续动作、请求或新活动。"
+        ),
+        "夸奖": "自然接住称赞，别过度谦虚；可以用轻自嘲让气氛更亲近。",
+        "求助帮忙": (
+            "先按上下文明确能帮、不能帮或需要确认什么；"
+            "未给出的口味、时间、地点等细节不能猜，也不能只开玩笑。"
+        ),
+        "征求建议": "先给明确看法和一个理由，再把决定权留给对方；幽默只碰选择困境。",
+        "倾诉求安慰": "点出这件事具体难在哪里并给陪伴；情绪明显时不要加笑点或给对方贴标签。",
+        "关心问候": "先如实回应自己的近况，再自然关心回去；不夸大、不卖惨。",
+        "朋友邀约": (
+            "根据上下文先说能不能去，只向对方问时间或地点中的一个；"
+            "如果两者都未知就优先只问时间，不能自己给出具体日期、时段或地点，也不新增其他安排。"
+        ),
+        "玩笑调侃": "顺着对方原话轻轻接梗，笑点落在处境或自己，不嘲笑对方。",
+        "道歉和解": (
+            "第一小句明确说收到了对方的道歉或诚意；第二小句保留刚才的真实感受；"
+            "最后邀请现在继续沟通。不能直接宣布事情已经过去，也不自行结束、推迟或改约。"
+        ),
+        "感谢": "自然接住谢意，回应彼此关系，不用客套话；可以轻松地说这是朋友该做的。",
+    },
+}
+
 # label -> instruction. Order here is the order shown in the dropdowns.
 #
 # Each entry is written as a *persona plus its verbal tics*, not as a description of a mood.
@@ -46,6 +86,12 @@ BUILTIN: dict[str, str] = {
         "整句话仍然自然、能直接发送，不能为了搞笑回避问题。"
         "不硬造网络梗、不嘲笑对方，不冒犯、不油腻暧昧、不讲低俗玩笑；"
         "对方严肃、难过或正在冲突时收住玩笑，优先认真回应。"
+    ),
+    "高情商幽默朋友": (
+        "像情商高、会接梗的熟朋友，不像客服或段子手。先贴着原话处理对方最重要的感受或诉求，"
+        "给清楚态度；只有气氛轻松时，末尾才加半句幽默。幽默只用消息里已经出现的词和处境做轻反差、"
+        "温和自嘲或顺梗，笑点不指向对方。只用上下文事实，不新增原因、安排、细节、共同经历、"
+        "昵称或承诺；微信口语，一句能直接发送。"
     ),
     "贴吧老哥 v1.0": (
         "贴吧老哥：一口网感口语，「有一说一」「绷不住了」「搁这」「这就去整」随手就来，"
@@ -118,6 +164,12 @@ def _custom_tones() -> dict[str, str]:
 
 CUSTOM: dict[str, str] = _custom_tones()
 PRESETS: dict[str, str] = {**BUILTIN, **CUSTOM}
+
+
+def guidance_for(tone: str, intent: str = "") -> str:
+    """Return only the current intent's rule so callers can place it last."""
+    return TONE_INTENT_GUIDANCE.get(tone, {}).get(intent, "")
+
 
 def _label_alternation() -> str:
     """The labels as one regex alternative, with spaces made optional.

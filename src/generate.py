@@ -160,7 +160,8 @@ PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
 - 稳妥、贴合上下文，可以直接发出去，不编造事实或承诺
 - 每条不超过 30 个字，是微信里打字的语气，不要客套话、不要解释
 - 只输出 {n} 行，每行一条，不要编号、不要引号、不要任何前后缀
-- 不要写出语气名称（不要写「{tone}：」这类前缀），直接从回复内容开始"""
+- 不要写出语气名称（不要写「{tone}：」这类前缀），直接从回复内容开始
+{intent_rule}"""
 
 SUMMARY_PROMPT = """请更新下面这段微信会话摘要。
 
@@ -503,10 +504,16 @@ class Generator:
         # the last two sentences is usually not a reply to this one sentence in isolation.
         context_line = f"最近的对话：\n{context}\n\n" if context else ""
         intent_line = f"判断出的意图：{intent}\n" if intent else ""
+        guidance = styles.guidance_for(tone, intent)
+        intent_rule = (
+            f"\n本条最高优先规则（必须遵守）：{guidance}"
+            if guidance else ""
+        )
         prompt = PROMPT_ONE.format(message=message, context_line=context_line,
                                    intent_line=intent_line,
                                    n=styles.PER_TONE, tone=tone,
-                                   instruction=styles.PRESETS[tone])
+                                   instruction=styles.PRESETS[tone],
+                                   intent_rule=intent_rule)
         emitted = 0
         buf = ""                 # fragments since the last newline
 
@@ -525,6 +532,7 @@ class Generator:
                 prompt,
                 on_delta if on_line is not None else None,
                 max_tokens=120,
+                temperature=styles.TONE_TEMPERATURES.get(tone, 0.9),
             )
         except ThinkingOnlyError as e:
             return [], str(e)            # already panel-ready: model named, fix suggested
