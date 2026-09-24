@@ -24,6 +24,7 @@ def hud_harness():
     names = {'_work', '_work_inner', '_push', '_reply_task', '_reply_current', '_push_reply',
              'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
              '_take_pregen', '_gen_with_pregen', '_finish_generate',
+             '_run_generation', '_analyze',
              '_prejudge_loop', '_pregen_loop', '_observe_snapshot',
              '_managed_context', '_disable_persistence',
              '_select_session', '_reset_for_session_change',
@@ -314,6 +315,37 @@ class OutgoingTests(unittest.TestCase):
         self.h.generator.generate.assert_not_called()
         self.h._reply_task(epoch, self.h._finish_generate, {}, None, time.perf_counter(), None)
         self.h.judge.rank_candidates.assert_not_called()
+
+    def test_shared_model_generation_receives_judged_intent(self):
+        self.incoming()
+        self.h.judge.shares_generation_model = True
+        self.h._finish_generate = Mock()
+        self.h.generator.generate.return_value = {"groups": []}
+        verdict = {"intent": "玩笑调侃", "confidence": 0.9, "risk": 1}
+        newest = SimpleNamespace(text="你可真行")
+
+        Harness._run_generation(self.h, newest, verdict, "session context")
+
+        args = self.h.generator.generate.call_args.args
+        self.assertEqual(args[0], "你可真行")
+        self.assertEqual(args[1], "玩笑调侃")
+        self.assertEqual(args[3], "session context")
+
+    def test_stale_shared_judgment_does_not_start_generation(self):
+        self.incoming()
+        self.h.judge.shares_generation_model = True
+        epoch = self.h._reply_epoch
+        newest = SimpleNamespace(text="下午开会", sender="")
+
+        def invalidate_during_judgment(*_args, **_kwargs):
+            self.h._reply_epoch += 1
+            return {"intent": "约会议", "confidence": 0.9, "risk": 1}
+
+        self.h.judge.judge.side_effect = invalidate_during_judgment
+        self.h._reply_task(
+            epoch, self.h._analyze, newest, "", "session context")
+
+        self.h.generator.generate.assert_not_called()
 
     def test_same_text_in_different_chat_changes_epoch(self):
         self.incoming()

@@ -9,6 +9,7 @@ import urllib.parse
 import userconfig
 from emotions import (
     EMOTIONS,
+    EMOTION_CHOICE_CRITERIA,
     EMOTION_INTENSITY_LEVELS,
     EMOTION_TRENDS,
     normalize_emotion_fields,
@@ -18,7 +19,8 @@ from judge import (
     ACTION_MAP,
     CHAT_SCENES,
     INTENTS,
-    INTENT_SELECTION_INSTRUCTION,
+    INTENT_CHOICE_CRITERIA,
+    INTENT_CHOICE_INSTRUCTION,
     SCENE_BOUNDARY_EXAMPLES,
     normalize_chat_scene,
     normalize_intent_for_scene,
@@ -28,8 +30,8 @@ from judge import (
 DEFAULT_BASE = "http://127.0.0.1:11434/v1"
 DEFAULT_MODEL = "qwen3.5:4b"
 TIMEOUT = 90
-MAX_CONTEXT_CHARS = 6_000
-CONTEXT_HEAD_CHARS = 2_000
+MAX_CONTEXT_CHARS = 1_200
+CONTEXT_HEAD_CHARS = 400
 OLLAMA_KEEP_ALIVE = "30m"
 
 
@@ -57,6 +59,19 @@ def _choice(value, choices, default: str) -> str:
         if choice in text:
             return choice
     return default
+
+
+def _indexed_choice(value, choices, default: str) -> str:
+    names = list(choices)
+    if not isinstance(value, bool):
+        try:
+            index = int(float(value))
+        except (TypeError, ValueError):
+            pass
+        else:
+            if 0 <= index < len(names):
+                return names[index]
+    return _choice(value, choices, default)
 
 
 def _json_object(text: str) -> dict:
@@ -116,30 +131,37 @@ class OpenAIJudge:
 
     def judge(self, message: str, context: str | None = None) -> dict:
         context = _bounded_context((context or "").strip())
-        intents = "；".join(f"{name}={desc}" for name, desc in INTENTS.items())
+        intents = "；".join(
+            f"{name}={desc}" for name, desc in INTENT_CHOICE_CRITERIA.items())
         emotions = "；".join(
-            f"{name}={desc}" for name, desc in EMOTIONS.items())
+            f"{name}={desc}" for name, desc in EMOTION_CHOICE_CRITERIA.items())
         trends = "；".join(
             f"{name}={desc}" for name, desc in EMOTION_TRENDS.items())
         scenes = "；".join(
             f"{name}={desc}" for name, desc in CHAT_SCENES.items())
         prompt = (
-            f"结合完整对话判断最后一句。\n"
-            f"选择规则：{INTENT_SELECTION_INSTRUCTION}\n"
-            f"消息场景：{scenes}\n"
+            "结合会话判断“对方最新消息”。会话里的“我”是 App 用户，"
+            "其他姓名或“对方”是发消息的人。\n"
+            f"意图规则：{INTENT_CHOICE_INSTRUCTION}\n"
+            f"场景：{scenes}\n"
             f"{SCENE_BOUNDARY_EXAMPLES}\n"
-            f"意图定义：{intents}\n"
-            f"情绪定义：{emotions}\n"
-            f"趋势定义：{trends}\n"
+            f"意图：{intents}\n"
+            f"情绪：{emotions}\n"
+            f"趋势：{trends}\n"
+            "强制边界：意图指对方这句话正在对我做什么，不是聊天主题。"
+            "只要没有要求我执行任务，就绝不能选“派活”；"
+            "提到工作、项目或很累都不等于派活。"
+            "“我今天真的累坏了”是倾诉求安慰；"
+            "“你今天感觉怎么样”是关心问候。\n"
             f"对话：{context or '无'}\n"
-            f"最后一句：{message}\n"
-            "只输出 JSON："
-            '{"p":"工作或朋友","i":"意图名","c":0到100,"r":0到9,"e":"情绪名",'
-            '"ec":0到100,"s":0到4,"t":"趋势名"}。'
+            f"对方最新消息：{message}\n"
+            "只输出紧凑 JSON，不要字段解释："
+            '{"v":["场景名","意图名",意图置信度0到100,风险0到9,'
+            '"情绪名",情绪置信度0到100,强度0到4,"趋势名"]}。'
         )
         body = {
             "model": self.model,
-            "max_tokens": 120,
+            "max_tokens": 64,
             "temperature": 0,
             "stream": False,
             "response_format": {"type": "json_object"},
@@ -157,6 +179,8 @@ class OpenAIJudge:
                 },
             ],
         }
+        if self._ollama_generate_url():
+            body["reasoning_effort"] = "none"
         body.update(_extra_params())
         data = self._post(body)
         choices = data.get("choices") or []
@@ -165,32 +189,58 @@ class OpenAIJudge:
         content = ((choices[0].get("message") or {}).get("content") or "")
         result = _json_object(content)
 
-        intent = _choice(
-            result.get("i", result.get("intent")), INTENTS, "闲聊")
-        scene = normalize_chat_scene(
-            result.get("p", result.get("scene")))
+        values = result.get("v")
+        compact = values if isinstance(values, list) and len(values) >= 7 else None
+        if compact is not None:
+            scene_value, intent_value, confidence_value, risk_value = compact[:4]
+            emotion_value, emotion_confidence_value = compact[4:6]
+            intensity_value = compact[6]
+            trend_value = compact[7] if len(compact) > 7 else "稳定"
+        else:
+            compact_scene = (
+                values[0]
+                if isinstance(values, list) and values else None
+            )
+            scene_value = result.get(
+                "p", result.get("scene", compact_scene))
+            intent_value = result.get("i", result.get("intent"))
+            confidence_value = result.get("c", result.get("confidence"))
+            risk_value = result.get("r", result.get("risk"))
+            emotion_value = result.get("e", result.get("emotion"))
+            emotion_confidence_value = result.get(
+                "ec", result.get("emotion_confidence"))
+            intensity_value = result.get(
+                "s", result.get("emotion_intensity"))
+            trend_value = result.get("t", result.get("emotion_trend"))
+
+        intent = _indexed_choice(intent_value, INTENTS, "闲聊")
+        if isinstance(scene_value, (int, float)) and not isinstance(
+                scene_value, bool):
+            scene_value = _indexed_choice(
+                scene_value, CHAT_SCENES, "不确定")
+        scene = normalize_chat_scene(scene_value)
         intent = normalize_intent_for_scene(intent, scene)
         confidence = _number(
-            result.get("c", result.get("confidence")), 0.0, 0.0, 1.0)
+            confidence_value, 0.0, 0.0, 1.0)
         risk = _number(
-            result.get("r", result.get("risk")), 0.0, 0.0, 9.0)
-        emotion = _choice(
-            result.get("e", result.get("emotion")), EMOTIONS, "平静")
-        trend = _choice(
-            result.get("t", result.get("emotion_trend")),
+            risk_value, 0.0, 0.0, 9.0)
+        emotion = _indexed_choice(
+            emotion_value, EMOTIONS, "平静")
+        trend = _indexed_choice(
+            trend_value,
             EMOTION_TRENDS,
             "稳定",
         )
         emotion_fields = normalize_emotion_fields(
             emotion=emotion,
             confidence=_number(
-                result.get("ec", result.get("emotion_confidence")),
+                emotion_confidence_value,
                 0.0,
                 0.0,
                 1.0,
             ),
             intensity=_number(
-                result.get("s", result.get("emotion_intensity")),
+                intensity_value,
                 0.0,
                 0.0,
                 float(len(EMOTION_INTENSITY_LEVELS) - 1),
@@ -263,10 +313,6 @@ class OpenAIJudge:
         return True
 
     def warm(self) -> bool:
-        if not self.keep_warm():
-            return False
-        try:
-            self.judge("预热", context="无")
-        finally:
-            self.keep_warm()
-        return True
+        # Loading the model is enough. A dummy structured judgment competes with the
+        # first real message on Ollama's single request slot and doubles startup latency.
+        return self.keep_warm()

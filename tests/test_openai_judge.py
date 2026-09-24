@@ -22,7 +22,7 @@ class OpenAIJudgeTests(unittest.TestCase):
         )
         judge._post = Mock(return_value={"choices": [{"message": {"content": """
 ```json
-{"p":"工作","i":"催进度","c":82,"r":4.5,"e":"焦虑","ec":75,"s":3,"t":"升温"}
+{"v":["工作","催进度",82,4.5,"焦虑",75,3,"升温"]}
 ```
 """}}]})
 
@@ -31,13 +31,16 @@ class OpenAIJudgeTests(unittest.TestCase):
 
         body = judge._post.call_args.args[0]
         self.assertEqual(body["model"], "qwen3.5:4b")
-        self.assertEqual(body["max_tokens"], 120)
+        self.assertEqual(body["max_tokens"], 64)
+        self.assertEqual(body["reasoning_effort"], "none")
         sent = body["messages"][1]["content"]
         self.assertIn("已经等了两天", sent)
-        self.assertIn(judge_module.INTENT_SELECTION_INSTRUCTION, sent)
+        self.assertIn(judge_module.INTENT_CHOICE_INSTRUCTION, sent)
         self.assertIn("同事聊生活也属于朋友场景", sent)
+        self.assertIn("没有要求我执行任务，就绝不能选“派活”", sent)
         self.assertIn("求助帮忙=", sent)
         self.assertIn("朋友邀约=", sent)
+        self.assertNotIn(judge_module.INTENTS["求助帮忙"], sent)
         self.assertEqual(result["intent"], "催进度")
         self.assertEqual(result["confidence"], 0.82)
         self.assertEqual(result["risk"], 4.5)
@@ -88,6 +91,19 @@ class OpenAIJudgeTests(unittest.TestCase):
             judge_module.normalize_intent_for_scene("求助帮忙", "工作"),
             "求助帮忙",
         )
+
+    def test_partial_compact_response_keeps_available_fields(self):
+        judge = OpenAIJudge(base="http://local/v1", key="ollama", model="test")
+        judge._post = Mock(return_value={"choices": [{"message": {"content":
+            '{"v":["工作"],"i":["派活"],"c":90,"r":4,"e":["平静"],'
+            '"ec":80,"s":1,"t":["稳定"]}'}}]})
+
+        result = judge.judge("这个需求今天跟一下")
+
+        self.assertEqual(result["scene"], "工作")
+        self.assertEqual(result["intent"], "派活")
+        self.assertEqual(result["confidence"], 0.9)
+        self.assertEqual(result["emotion"], "平静")
 
     def test_every_intent_has_compact_criteria_and_action_guidance(self):
         self.assertEqual(
@@ -151,28 +167,21 @@ class OpenAIJudgeTests(unittest.TestCase):
         ])
         judge._post.assert_not_called()
 
-    def test_local_ollama_warm_loads_and_keeps_one_model_resident(self):
+    def test_local_ollama_warm_loads_without_dummy_judgment(self):
         judge = OpenAIJudge(
             base="http://127.0.0.1:11434/v1",
             key="ollama",
             model="qwen3.5:4b",
         )
-        with patch("judge_openai.http_post_json", side_effect=[
-            {"done": True, "done_reason": "load"},
-            {"choices": [{"message": {"content":
-                '{"i":"闲聊","c":90,"r":0,"e":"平静",'
-                '"ec":90,"s":0,"t":"稳定"}'}}]},
-            {"done": True, "done_reason": "load"},
-        ]) as post:
+        with patch(
+            "judge_openai.http_post_json",
+            return_value={"done": True, "done_reason": "load"},
+        ) as post:
             self.assertTrue(judge.warm())
-        self.assertEqual(post.call_count, 3)
-        first_url, _headers, first_body, timeout = post.call_args_list[0].args
-        judge_url = post.call_args_list[1].args[0]
-        final_url = post.call_args_list[2].args[0]
+        self.assertEqual(post.call_count, 1)
+        first_url, _headers, first_body, timeout = post.call_args.args
         self.assertEqual(
             first_url, "http://127.0.0.1:11434/api/generate")
-        self.assertEqual(judge_url, "http://127.0.0.1:11434/v1/chat/completions")
-        self.assertEqual(final_url, first_url)
         self.assertEqual(first_body["prompt"], "")
         self.assertEqual(first_body["keep_alive"], "30m")
         self.assertEqual(timeout, judge.timeout)

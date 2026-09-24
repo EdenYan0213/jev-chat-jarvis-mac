@@ -98,6 +98,7 @@ STABLE_READS = 3         # … but only after this many consecutive unchanged re
 MIN_GAP_S = 2.0          # never restart analysis faster than this
 CONTEXT_TURNS = 4        # recent turns the generation half sees
 JUDGE_TURNS = 2          # recent turns the judge half sees: shorter prompt, faster forward
+SUMMARY_IDLE_S = 30.0    # compress only after the interactive conversation has gone quiet
 
 
 # Shared with the settings window so both surfaces keep one visual vocabulary.
@@ -205,6 +206,7 @@ class HudController(NSObject):
         self._last_observation = None
         self._last_context = None
         self._last_purge_ts = time.time()
+        self._last_interactive_ts = time.time()
         self._storage_warning_shown = False
         try:
             self.session_store = ConversationStore()
@@ -213,8 +215,8 @@ class HudController(NSObject):
             shared_model = bool(getattr(
                 self.judge, "shares_generation_model", False))
             context_options = (
-                {"soft_limit": 4_000, "hard_limit": 6_000,
-                 "recent_count": 16}
+                {"soft_limit": 1_400, "hard_limit": 1_800,
+                 "recent_count": 8}
                 if shared_model else {}
             )
             self.context_builder = ContextBuilder(
@@ -224,10 +226,25 @@ class HudController(NSObject):
                 Generator(timeout=90),
                 soft_limit=context_options.get("soft_limit", 8_000),
                 recent_count=context_options.get("recent_count", 20),
+                input_limit=context_options.get("hard_limit", 8_000),
                 interactive_busy=lambda: bool(
-                    getattr(self, "_analyzing", False)
+                    getattr(self, "_busy", False)
+                    or getattr(self, "_analyzing", False)
                     or getattr(self, "_prejudging", False)
-                    or getattr(self, "_pregen_running", False)),
+                    or getattr(self, "_pregen_running", False)
+                    or getattr(self, "_regen_running", False)
+                    or (
+                        getattr(self, "_reply_key", None) is not None
+                        and getattr(self, "last_seen", None)
+                        != getattr(self, "analyzed_text", None)
+                    )
+                    or (
+                        time.time() - max(
+                            getattr(self, "last_change_ts", 0.0),
+                            getattr(self, "_last_interactive_ts", 0.0),
+                        )
+                        < SUMMARY_IDLE_S
+                    )),
                 logger=_log,
             )
             self.summary_worker.start()
@@ -261,6 +278,7 @@ class HudController(NSObject):
         # message superseded is dropped instead of written into the new run's rows
         self._gen_epoch = 0
         self._stream_rows: dict[int, int] = {}   # slot -> lines already shown, per run
+        self._regen_running = False
 
         self._busy = False
         self._next_read_ts = 0.0    # reads before this timestamp are skipped (quiet screen)
@@ -1077,6 +1095,8 @@ class HudController(NSObject):
     @objc.python_method
     def _regen_work(self, text: str, intent: str, slot_tones: list[str]):
         t0 = time.perf_counter()
+        self._regen_running = True
+        self._last_interactive_ts = time.time()
         try:
             if not self._reply_current():
                 return
@@ -1101,6 +1121,9 @@ class HudController(NSObject):
         except Exception as e:
             _log(f"换话术失败 {type(e).__name__}: {str(e)[:60]}")
             self._push("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}")
+        finally:
+            self._regen_running = False
+            self._last_interactive_ts = time.time()
 
     @objc.python_method
     def _payload_current(self, payload) -> bool:
@@ -1572,7 +1595,8 @@ class HudController(NSObject):
                                  args=(self._reply_epoch, self._run_generation,
                                        newest, pr[1], context), daemon=True).start()
             else:
-                _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
+                _log(f"开始分析 · 上下文 {len(context or '')} 字 · "
+                     f"这条消息出现到现在 {now - self.last_change_ts:.1f}s")
                 self._push("applyPending:", (newest.text, newest.sender, prev_text))
                 # off the tick path on purpose: judge+generate+rank takes over a second, and
                 # while it runs the loop must keep reading — a message landing mid-analysis
@@ -1604,6 +1628,7 @@ class HudController(NSObject):
             self._push("applyError:", f"分析失败: {type(e).__name__}: {str(e)[:40]}")
         finally:
             self._analyzing = False
+            self._last_interactive_ts = time.time()
             keep_warm = getattr(self.judge, "keep_warm", None)
             if callable(keep_warm):
                 def refresh_keepalive():
@@ -1722,7 +1747,7 @@ class HudController(NSObject):
 
     @objc.python_method
     def _gen_with_pregen(self, text: str, context: str | None,
-                         on_candidate=None) -> dict:
+                         intent: str = "", on_candidate=None) -> dict:
         """Generate, preferring an early run already in flight or finished (full path).
 
         The hook only reaches the fresh call: an early-run hit already has all its lines,
@@ -1733,7 +1758,8 @@ class HudController(NSObject):
         if not self._reply_current():
             return {"groups": []}
         if gen is None:
-            gen = self.generator.generate(text, "", list(tones), context, on_candidate)
+            gen = self.generator.generate(
+                text, intent, list(tones), context, on_candidate)
         return gen
 
     @objc.python_method
@@ -1755,14 +1781,20 @@ class HudController(NSObject):
                 return
             note = f"（早跑命中，停稳后仅等 {wait_ms:.0f}ms）" if gen is not None else ""
             if gen is None:
-                gen = self.generator.generate(newest.text, "", list(self.slot_tones),
-                                              context, self._stream_hook(t0))
+                gen = self.generator.generate(
+                    newest.text,
+                    verdict.get("intent", ""),
+                    list(self.slot_tones),
+                    context,
+                    self._stream_hook(t0),
+                )
             self._finish_generate(gen, newest, t0, verdict, note)
         except Exception as e:
             _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
             self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
         finally:
             self._analyzing = False
+            self._last_interactive_ts = time.time()
 
     @objc.python_method
     def _disable_persistence(self, exc: Exception) -> None:
@@ -1862,6 +1894,9 @@ class HudController(NSObject):
                     verdict = self.judge.judge(
                         newest.text, context=context)
                 ms = (time.perf_counter() - t_judge) * 1000
+                if not self._reply_current():
+                    _log(f"判断 {ms:.0f}ms · 消息已更新，跳过旧消息候选")
+                    return
                 first = not self._judged_once
                 self._judged_once = True
                 note = "（首次，含本地模型加载）" if first else ""
@@ -1876,7 +1911,11 @@ class HudController(NSObject):
                     f"判断失败: {type(e).__name__}: {str(e)[:40]}")
             try:
                 gen = self._gen_with_pregen(
-                    newest.text, context, self._stream_hook(t0))
+                    newest.text,
+                    context,
+                    verdict.get("intent", "") if verdict else "",
+                    self._stream_hook(t0),
+                )
             except Exception as e:
                 _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
                 self._push(
@@ -1891,7 +1930,7 @@ class HudController(NSObject):
             # early run that started at detection time (_gen_with_pregen) — only a miss
             # streams, and only that fresh call takes the hook
             gen_future = ex.submit(self._reply_task, self._reply_worker.epoch,
-                                   self._gen_with_pregen, newest.text, context,
+                                   self._gen_with_pregen, newest.text, context, "",
                                    self._stream_hook(t0))
             verdict = None
             t_judge = time.perf_counter()

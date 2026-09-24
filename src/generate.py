@@ -149,14 +149,24 @@ THINKING_ONLY_HINT = ("思考型 {model}：额度被思考耗尽，正文 0 条�
 
 # One request per tone. {n} appears twice on purpose: the exact-line demand has to agree
 # with the count asked for, or the model pads the answer with a line of its own.
-PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
+PROMPT_ONE = """你正在替 App 用户本人拟微信回复。
 
-{context_line}消息：「{message}」
+角色关系（最高优先级）：
+- 「我」= 正在使用本 App 的人，也是候选回复的发送者
+- 「对方」= 发来“最新消息”的人，也是候选回复的接收者
+- 最近对话中的「我:」是我之前发过的话；其他姓名或「对方:」是对方说的话
+- 输出必须是“我现在发给对方”的话，绝不能替对方回复我，也不能把对方的经历说成我的
+- 以我的事实、利益和边界为准，不为讨好对方擅自认错、答应、承诺或假设我有空
+
+{context_line}对方最新消息：「{message}」
 {intent_line}
 请写 {n} 条回复候选，语气统一成下面这一种：
 「{tone}」{instruction}
 
 硬性要求：
+- 先判断对方在对我说什么，再从我的立场直接回应；对方问我，就回答我的情况；对方倾诉，就回应对方的感受
+- 最新消息里的第一人称属于对方：例如对方说「我累了」，应回应「你先歇会儿」，不能把它改写成「我累了」
+- 除非上下文明确，不得声称我也有相同感受或经历，也不得默认我同意、有空、做错了或能按时完成
 - 稳妥、贴合上下文，可以直接发出去，不编造事实或承诺
 - 每条不超过 30 个字，是微信里打字的语气，不要客套话、不要解释
 - 只输出 {n} 行，每行一条，不要编号、不要引号、不要任何前后缀
@@ -531,7 +541,7 @@ class Generator:
             raw = self._call(
                 prompt,
                 on_delta if on_line is not None else None,
-                max_tokens=120,
+                max_tokens=max(64, styles.PER_TONE * 48),
                 temperature=styles.TONE_TEMPERATURES.get(tone, 0.9),
             )
         except ThinkingOnlyError as e:
@@ -553,13 +563,25 @@ class Generator:
                 on_line(text)
         return self._parse(raw)[:styles.PER_TONE], ""
 
-    def summarize(self, prior_summary: str, messages: str) -> str:
+    def summarize(self, prior_summary: str, messages: str,
+                  should_cancel=None) -> str:
         prompt = SUMMARY_PROMPT.format(
             prior=prior_summary.strip() or "无",
             messages=messages.strip(),
         )
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("summary deferred for interactive work")
+
+        def cancel_if_busy(_fragment: str) -> None:
+            if should_cancel():
+                raise InterruptedError("summary interrupted for interactive work")
+
         return self._call(
-            prompt, max_tokens=800, temperature=0.2).strip()
+            prompt,
+            cancel_if_busy if should_cancel is not None else None,
+            max_tokens=384,
+            temperature=0.2,
+        ).strip()
 
     def generate(self, message: str, intent: str = "",
                  slot_tones: list[str] | None = None,

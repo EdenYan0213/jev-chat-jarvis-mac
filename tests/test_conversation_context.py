@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import Mock
 
@@ -227,7 +229,7 @@ class GeneratorSummaryTests(unittest.TestCase):
         self.assertIn("未解决问题", prompt)
         self.assertEqual(
             generator._call.call_args.kwargs,
-            {"max_tokens": 800, "temperature": 0.2})
+            {"max_tokens": 384, "temperature": 0.2})
 
 
 class SummaryWorkerTests(unittest.TestCase):
@@ -313,6 +315,23 @@ class SummaryWorkerTests(unittest.TestCase):
             self.store.get_session(
                 self.session.id).summary_until_message_id,
             None)
+
+    def test_background_loop_runs_only_one_pass_per_schedule(self):
+        worker = SummaryWorker(
+            self.store, Mock(), retry_delay=0.01)
+        ran = threading.Event()
+        worker.run_once = Mock(
+            side_effect=lambda _session_id: ran.set() or True)
+        worker.needs_summary = Mock(return_value=True)
+        worker.start()
+        self.addCleanup(worker.stop)
+
+        worker.schedule(self.session.id)
+        self.assertTrue(ran.wait(0.5))
+        time.sleep(0.05)
+
+        self.assertEqual(worker.run_once.call_count, 1)
+        worker.needs_summary.assert_not_called()
 
 
 if __name__ == "__main__":

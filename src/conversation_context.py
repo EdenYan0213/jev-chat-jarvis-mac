@@ -331,12 +331,18 @@ class SummaryWorker:
                 return False
             source = "\n".join(_line(message) for message in selected)
             summary = self.summarizer.summarize(
-                session.summary_text, source).strip()
+                session.summary_text,
+                source,
+                should_cancel=self.interactive_busy,
+            ).strip()
             if not summary:
                 raise ValueError("empty summary")
             self.store.update_summary(
                 session_id, summary, selected[-1].id, version=1)
             return True
+        except InterruptedError:
+            self.logger("摘要更新已让路给新消息")
+            return False
         except Exception as exc:
             self.logger(f"摘要更新失败 {type(exc).__name__}")
             return False
@@ -377,6 +383,8 @@ class SummaryWorker:
                     return
                 self.schedule(session_id)
                 continue
-            changed = self.run_once(session_id)
-            if changed and self.needs_summary(session_id):
-                self.schedule(session_id)
+            self.run_once(session_id)
+            # One observed snapshot earns at most one compression pass. Re-queueing here
+            # lets a long session monopolize a single-slot local LLM for minutes, delaying
+            # every interactive judgment behind background work. Future snapshots schedule
+            # the next pass, while ContextBuilder keeps every foreground request bounded.

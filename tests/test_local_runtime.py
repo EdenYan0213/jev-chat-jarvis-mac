@@ -93,6 +93,39 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertTrue(prompt.rstrip().endswith(
             styles.guidance_for("高情商幽默朋友", "道歉和解")))
 
+    def test_generation_prompt_always_replies_from_app_users_perspective(self):
+        generator = generate.Generator()
+        generator._call = Mock(return_value="我最近还行，你呢")
+
+        texts, error = generator._one_tone(
+            "你最近怎么样？",
+            "关心问候",
+            "高情商话术",
+            "我: 前阵子有点忙\n对方: 记得休息",
+        )
+
+        self.assertEqual(texts, ["我最近还行，你呢"])
+        self.assertEqual(error, "")
+        prompt = generator._call.call_args.args[0]
+        self.assertIn("「我」= 正在使用本 App 的人", prompt)
+        self.assertIn("候选回复的发送者", prompt)
+        self.assertIn("对方最新消息：「你最近怎么样？」", prompt)
+        self.assertIn("绝不能替对方回复我", prompt)
+        self.assertIn("最新消息里的第一人称属于对方", prompt)
+        self.assertIn("不得默认我同意、有空、做错了", prompt)
+
+    def test_high_eq_friend_guidance_protects_perspective_and_boundaries(self):
+        comfort = styles.guidance_for("高情商幽默朋友", "倾诉求安慰")
+        chasing = styles.guidance_for("高情商幽默朋友", "催进度")
+        greeting = styles.guidance_for("暖心阳光男孩", "关心问候")
+
+        self.assertIn("把对方经历写成我的", comfort)
+        self.assertIn("不能反过来嫌对方催", chasing)
+        self.assertIn("禁止说「别催」", chasing)
+        self.assertIn("第一小句必须直接回答我现在怎么样", greeting)
+        self.assertIn("不能先去安慰前文里的对方", greeting)
+        self.assertIn("不得补充我刚做完什么", greeting)
+
     def test_hud_local_generator_allows_cold_start(self):
         tree = ast.parse((ROOT / "src" / "hud.py").read_text())
         calls = [
