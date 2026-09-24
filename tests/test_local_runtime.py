@@ -41,6 +41,18 @@ class LocalRuntimeTests(unittest.TestCase):
             "我在，慢慢说",
         )
 
+    def test_humorous_boy_tone_is_available_and_its_label_is_stripped(self):
+        self.assertIn("幽默男孩", styles.BUILTIN)
+        prompt = styles.BUILTIN["幽默男孩"]
+        self.assertIn("轻巧反转", prompt)
+        self.assertIn("生活化比喻", prompt)
+        self.assertIn("不嘲笑对方", prompt)
+        self.assertIn("严肃、难过或正在冲突时收住玩笑", prompt)
+        self.assertEqual(
+            styles.strip_label("幽默男孩：这个需求像早高峰，挤一挤还是能上车"),
+            "这个需求像早高峰，挤一挤还是能上车",
+        )
+
     def test_hud_local_generator_allows_cold_start(self):
         tree = ast.parse((ROOT / "src" / "hud.py").read_text())
         calls = [
