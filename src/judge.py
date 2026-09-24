@@ -1,10 +1,7 @@
 """Judge: local Jev-shaped model reads a Chinese message and returns intent + risk.
 
-One forward pass answers both slots (decider's documented multi-question layout:
+One forward pass answers every slot (decider's documented multi-question layout:
 append further `Question k: ... Answer k: (` blocks and read logits at each slot).
-
-Measured on 22 real Chinese workplace messages, zero-shot: 86% intent accuracy
-against a 13.6% majority baseline.
 """
 
 from __future__ import annotations
@@ -21,21 +18,96 @@ from emotions import (
     normalize_emotion_fields,
 )
 
-# 描述保持这个长度是有实测依据的，别为了省 prefill 时间去瘦身：两轮压缩措辞
-# （保语义锚点、每条砍 ~1/3 字符）在 22 条回归上分别是 81.8% 和 77.3%，都低于
-# 原文的 86.4%——批评/要解释 的边界对措辞极敏感。省下的 ~100 ms 判断又藏在
-# 停稳窗口里基本不可见，不划算（2026-09 实测，judge_zh_test.py 已改为直接
-# import 这份 INTENTS，改这里必须重跑回归）。
+# The descriptions deliberately state both the relationship and the requested response.
+# Without those anchors, a personal favor gets mislabeled as 派活 and every emotional
+# message collapses into 闲聊. judge_zh_test.py imports this exact mapping so additions
+# can be evaluated against the prompt the app really sends.
 INTENTS = {
-    "派活": "对方要我做一件事或接一个任务",
+    "派活": "在明确的职场或项目语境中，对方要我执行任务或承担交付",
     "催进度": "对方在催促我尽快完成某个已在办的事",
     "问进度": "对方在询问某件事的进展或状态",
-    "批评": "对方对我的工作或结果表达不满、指出错误",
+    "批评": "对方对我的做法、言语、工作或结果表达不满、指出错误",
     "要解释": "对方要求我说明原因或给出解释",
-    "闲聊": "对方只是在聊天、分享或表达感受，没有具体要求",
-    "约会议": "对方想安排一次会议或通话",
-    "夸奖": "对方在肯定、称赞我的成果",
+    "闲聊": "普通寒暄或分享，没有更具体的求助、倾诉、问候、邀约等意图",
+    "约会议": "对方想围绕明确的工作事项安排会议或工作通话",
+    "夸奖": "对方在肯定、称赞我的表现、能力或成果",
+    "求助帮忙": "对方请我处理生活或私人请托，即使对方本身是同事",
+    "征求建议": "对方想听我的看法、建议或如何选择，不是要我替他完成",
+    "倾诉求安慰": "对方在表达难过、委屈、焦虑或疲惫，希望被理解和陪伴",
+    "关心问候": "对方在关心我的近况、状态、安全或身体感受",
+    "朋友邀约": "对方想为非工作目的约我吃饭、见面、出游、娱乐或私人通话",
+    "玩笑调侃": "对方在开玩笑、接梗或善意打趣，不是在认真批评",
+    "道歉和解": "对方在道歉、缓和矛盾或尝试修复关系",
+    "感谢": "对方在感谢我的帮助、陪伴或付出",
 }
+
+# Keep this compact for structured Jev/Laya choice heads with a limited question budget.
+INTENT_CHOICE_CRITERIA = {
+    "派活": "职场任务",
+    "催进度": "催已办事项",
+    "问进度": "问进展状态",
+    "批评": "不满或指错",
+    "要解释": "追问原因",
+    "闲聊": "无具体诉求的寒暄分享",
+    "约会议": "工作会议通话",
+    "夸奖": "肯定称赞",
+    "求助帮忙": "生活私人请托",
+    "征求建议": "询问看法选择",
+    "倾诉求安慰": "负面感受求理解",
+    "关心问候": "关心近况安全",
+    "朋友邀约": "非工作见面娱乐",
+    "玩笑调侃": "开玩笑接梗",
+    "道歉和解": "道歉修复关系",
+    "感谢": "表达感谢",
+}
+
+INTENT_SELECTION_INSTRUCTION = (
+    "先判断是工作协作还是朋友社交，再结合完整会话选择最具体的意图。"
+    "只有明确的工作任务分配才选“派活”，朋友请托选“求助帮忙”；"
+    "工作会议选“约会议”，吃饭出游等选“朋友邀约”；"
+    "能选倾诉、问候、建议、调侃、道歉或感谢时不要笼统选“闲聊”。"
+)
+
+INTENT_CHOICE_INSTRUCTION = (
+    "结合上下文选最具体意图；工作任务才是派活，生活请托是求助帮忙，"
+    "工作会议与朋友邀约分开，具体社交意图优先于闲聊。"
+)
+
+CHAT_SCENES = {
+    "工作": "这句话在推进工作任务、项目或业务",
+    "朋友": "这句话在处理私人日常、情感或社交",
+}
+
+SCENE_BOUNDARY_EXAMPLES = (
+    "场景按事情而不是联系人身份判断，同事聊生活也属于朋友场景。"
+    "边界示例：“同事下班帮带咖啡”=朋友+求助帮忙；"
+    "“帮我取一下快递”=朋友+求助帮忙；"
+    "“这个需求今天跟一下”=工作+派活；"
+    "“周末一起吃饭吗”=朋友+朋友邀约；"
+    "“下午三点开会同步”=工作+约会议。"
+)
+
+
+def normalize_chat_scene(value) -> str:
+    text = str(value or "").strip()
+    if text in CHAT_SCENES:
+        return text
+    if any(word in text for word in ("朋友", "私人", "社交", "家人", "伴侣")):
+        return "朋友"
+    if any(word in text for word in ("工作", "职场", "同事", "老板", "客户")):
+        return "工作"
+    return "不确定"
+
+
+def normalize_intent_for_scene(intent: str, scene: str) -> str:
+    """Repair work-shaped labels that small models emit for private messages."""
+    if scene == "朋友":
+        return {
+            "派活": "求助帮忙",
+            "约会议": "朋友邀约",
+        }.get(intent, intent)
+    return intent
+
 
 RISK_LEVELS = [
     "完全没风险，怎么回都行",
@@ -60,6 +132,14 @@ ACTION_MAP = {
     "闲聊": ["轻松回应", "可以互动", "不用当真"],
     "约会议": ["确认时间", "说清议程", "准备好材料"],
     "夸奖": ["接住并感谢", "别过度谦虚", "可以顺带提下一步"],
+    "求助帮忙": ["确认具体需要", "能帮就说明怎么帮", "做不到就给替代办法"],
+    "征求建议": ["先理解顾虑", "给明确看法", "把决定权留给对方"],
+    "倾诉求安慰": ["先共情", "别急着讲道理", "问对方想被陪伴还是要建议"],
+    "关心问候": ["自然回应近况", "接住对方关心", "顺势关心对方"],
+    "朋友邀约": ["明确愿不愿意", "确认时间地点", "不方便就给替代时间"],
+    "玩笑调侃": ["顺着接梗", "保持分寸", "别误判成冲突"],
+    "道歉和解": ["接住道歉", "说清感受和边界", "愿意就给和解下一步"],
+    "感谢": ["自然接住", "不用过度客套", "回应彼此关系"],
 }
 
 
@@ -184,7 +264,7 @@ class Judge:
 
         prompt = f"Context:\n{context + chr(10) + chr(10) if context else ''}{message}\n\n"
         # slot 0: intent
-        prompt += "Question: 这句话的真实意图是什么？\nOptions:\n"
+        prompt += f"Question: {INTENT_SELECTION_INSTRUCTION}\nOptions:\n"
         for i, name in enumerate(intents):
             prompt += f"({letters[i]}) {name} - {INTENTS[name]}\n"
         prompt += "Answer: ("
@@ -208,8 +288,17 @@ class Judge:
         for i, name in enumerate(trends):
             prompt += f"({letters[i]}) {name} - {EMOTION_TRENDS[name]}\n"
         prompt += "Answer: ("
+        # slot 5: relationship scene, used to repair the two most common cross-scene
+        # confusions without a second model call.
+        prompt += (
+            "\n\nQuestion: 最后一句是在推进工作，还是在处理私人社交？"
+            f"{SCENE_BOUNDARY_EXAMPLES}\nOptions:\n"
+        )
+        for i, name in enumerate(CHAT_SCENES):
+            prompt += f"({letters[i]}) {name} - {CHAT_SCENES[name]}\n"
+        prompt += "Answer: ("
 
-        logits, slot_token_idx = self._forward(prompt, 5)
+        logits, slot_token_idx = self._forward(prompt, 6)
 
         intent_probs = self._slot_probs([logits[slot_token_idx[0]]], len(intents), 0)
         risk_probs = self._slot_probs([logits[slot_token_idx[1]]], len(RISK_LEVELS), 0)
@@ -220,8 +309,13 @@ class Judge:
             len(EMOTION_INTENSITY_LEVELS), 0)
         trend_probs = self._slot_probs(
             [logits[slot_token_idx[4]]], len(trends), 0)
+        scene_probs = self._slot_probs(
+            [logits[slot_token_idx[5]]], len(CHAT_SCENES), 0)
 
         intent_idx = int(np.argmax(intent_probs))
+        scene_idx = int(np.argmax(scene_probs))
+        scene = list(CHAT_SCENES)[scene_idx]
+        intent = normalize_intent_for_scene(intents[intent_idx], scene)
         risk_value = float((np.arange(len(RISK_LEVELS)) * risk_probs).sum())
         emotion_idx = int(np.argmax(emotion_probs))
         intensity_value = float((
@@ -236,13 +330,14 @@ class Judge:
         )
 
         return {
-            "intent": intents[intent_idx],
+            "intent": intent,
             "confidence": float(intent_probs[intent_idx]),
             "intent_probs": {n: float(p) for n, p in zip(intents, intent_probs)},
             "risk": round(risk_value, 1),
             "risk_probs": {str(i): float(p) for i, p in enumerate(risk_probs)},
-            "actions": ACTION_MAP.get(intents[intent_idx], []),
+            "actions": ACTION_MAP.get(intent, []),
             "message": message,
+            "scene": scene,
             **emotion_fields,
         }
 

@@ -36,7 +36,17 @@ from emotions import (
     normalize_emotion_fields,
 )
 from generate import http_post_json
-from judge import ACTION_MAP, INTENTS, RISK_LEVELS
+from judge import (
+    ACTION_MAP,
+    CHAT_SCENES,
+    INTENTS,
+    INTENT_CHOICE_CRITERIA,
+    INTENT_CHOICE_INSTRUCTION,
+    RISK_LEVELS,
+    SCENE_BOUNDARY_EXAMPLES,
+    normalize_chat_scene,
+    normalize_intent_for_scene,
+)
 
 DEFAULT_BASE = "https://api.typesafe.ai"
 DEFAULT_MODEL = "jev-latest"
@@ -68,8 +78,8 @@ class JevJudge:
             "state": state,
             "questions": {
                 "intent": {"type": "choice",
-                           "instructions": "这句话的真实意图是什么？",
-                           "criteria": INTENTS},
+                           "instructions": INTENT_CHOICE_INSTRUCTION,
+                           "criteria": INTENT_CHOICE_CRITERIA},
                 "risk": {"type": "score",
                          "instructions": "如果直接回复这句话，风险有多大？",
                          "criteria": RISK_LEVELS},
@@ -88,6 +98,14 @@ class JevJudge:
                     "instructions": "相比会话前文，最新消息的情绪趋势是什么？",
                     "criteria": EMOTION_TRENDS,
                 },
+                "scene": {
+                    "type": "choice",
+                    "instructions": (
+                        "最后一句是在推进工作还是处理私人社交？"
+                        + SCENE_BOUNDARY_EXAMPLES
+                    ),
+                    "criteria": CHAT_SCENES,
+                },
             },
         }
         data = self._post(payload)
@@ -97,6 +115,7 @@ class JevJudge:
         emotion_ans = answers.get("emotion") or {}
         intensity_ans = answers.get("emotion_intensity") or {}
         trend_ans = answers.get("emotion_trend") or {}
+        scene_ans = answers.get("scene") or {}
 
         intent = intent_ans.get("choice") or "闲聊"
         if intent not in INTENTS:
@@ -107,6 +126,8 @@ class JevJudge:
                     break
             else:
                 intent = "闲聊"
+        scene = normalize_chat_scene(scene_ans.get("choice"))
+        intent = normalize_intent_for_scene(intent, scene)
         confidence = float(intent_ans.get("confidence") or 0.0)
         risk = risk_ans.get("score")
         risk = float(risk) if isinstance(risk, (int, float)) else 0.0
@@ -126,6 +147,7 @@ class JevJudge:
             "actions": ACTION_MAP.get(intent, []),
             "message": message,
             "backend": f"jev/{self.model}",
+            "scene": scene,
             **emotion_fields,
         }
 

@@ -1,7 +1,7 @@
-"""Chinese intent-judgment test: can a local Jev-shaped model read a boss message?
+"""Chinese intent-judgment test across workplace and everyday social messages.
 
-Zero-shot, no training — this measures how much labeling work the app will need.
-Cases are real messages pulled from the live WeChat window plus realistic variants.
+Zero-shot, no training. The decider path calls the production Judge directly so scene
+normalization and all prompt changes are covered instead of being reimplemented here.
 """
 
 from __future__ import annotations
@@ -10,12 +10,14 @@ import json
 import time
 from pathlib import Path
 
-import numpy as np
-
-# 直接 import 判断层的 INTENTS：回归测的必须是线上真正发出的那份 prompt。
-# 此前这里是一份手工同步的副本，judge.py 改了描述这里不会跟着变，回归就在
-# 测一个没人用的配置（与 dtype 那条注释是同一个原则）。
-from judge import INTENTS
+from judge import (
+    CHAT_SCENES,
+    INTENT_CHOICE_CRITERIA,
+    INTENT_CHOICE_INSTRUCTION,
+    Judge,
+    normalize_chat_scene,
+    normalize_intent_for_scene,
+)
 
 # (message text, gold intent) — includes the live-captured ones
 CASES: list[tuple[str, str]] = [
@@ -41,42 +43,39 @@ CASES: list[tuple[str, str]] = [
     ("方便的话我们语音聊十分钟", "约会议"),
     ("这个做得不错，继续", "夸奖"),
     ("牛逼，这个思路好", "夸奖"),
+    ("能帮我取一下快递吗", "求助帮忙"),
+    ("我搬家那天能来搭把手吗", "求助帮忙"),
+    ("你觉得我该不该换工作", "征求建议"),
+    ("这两件衣服你觉得哪件好看", "征求建议"),
+    ("今天真的好累，感觉没人理解我", "倾诉求安慰"),
+    ("我最近心里特别难受，想找个人说说", "倾诉求安慰"),
+    ("到家了吗，路上还顺利吗", "关心问候"),
+    ("你感冒好点没有", "关心问候"),
+    ("周末一起吃饭吗", "朋友邀约"),
+    ("晚上要不要出来散散步", "朋友邀约"),
+    ("你这个表情包也太像你了哈哈", "玩笑调侃"),
+    ("可以啊你，现在都会放我鸽子了", "玩笑调侃"),
+    ("刚才是我语气不好，对不起", "道歉和解"),
+    ("别生气了，是我没考虑你的感受", "道歉和解"),
+    ("谢谢你今天一直陪着我", "感谢"),
+    ("多亏你帮忙，不然我真搞不定", "感谢"),
 ]
 
 
 def run_decider() -> dict:
-    """Mapika/decider-2b via the documented letter-logit readout."""
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    repo = "Mapika/decider-2b"
-    tok = AutoTokenizer.from_pretrained(repo)
-    dev = "mps" if torch.backends.mps.is_available() else "cpu"
-    # must match src/judge.py — a regression test measuring a different dtype is measuring
-    # a configuration nobody ships
-    dtype = torch.float16 if dev == "mps" else torch.float32
-    model = AutoModelForCausalLM.from_pretrained(repo, dtype=dtype).to(dev).eval()
-    letters = "ABCDEFGH"
-    lids = [tok.encode(c, add_special_tokens=False)[0] for c in letters]
-    temp = 1.3
-
-    def judge(text: str) -> tuple[str, float, np.ndarray]:
-        names = list(INTENTS)
-        prompt = f"Context:\n{text}\n\nQuestion: 这句话的真实意图是什么？\nOptions:\n"
-        for i, n in enumerate(names):
-            prompt += f"({letters[i]}) {n} - {INTENTS[n]}\n"
-        prompt += "Answer: ("
-        ids = tok(prompt, return_tensors="pt").to(dev)
-        with torch.no_grad():
-            logits = model(**ids).logits[0, -1]
-        probs = torch.softmax(logits[lids[: len(names)]].float() / temp, -1).cpu().numpy()
-        return names[int(np.argmax(probs))], float(probs.max()), probs
-
+    """Mapika/decider-2b through the exact production prompt and normalization."""
+    judge = Judge()
     t0 = time.perf_counter()
     results = []
     for text, gold in CASES:
-        pred, conf, _ = judge(text)
-        results.append({"text": text, "gold": gold, "pred": pred, "conf": conf})
+        verdict = judge.judge(text)
+        results.append({
+            "text": text,
+            "gold": gold,
+            "pred": verdict["intent"],
+            "conf": verdict["confidence"],
+            "scene": verdict["scene"],
+        })
     return {"model": "decider-2b", "elapsed_s": time.perf_counter() - t0, "results": results}
 
 
@@ -85,11 +84,13 @@ def run_laya_multilingual() -> dict:
     import laya
 
     agent = laya.load("convaiinnovations/laya", subfolder="multilingual")
-    names = list(INTENTS)
     question = {
         "intent": {"type": "choice",
-                   "instructions": "这句话的真实意图是什么？",
-                   "criteria": INTENTS},
+                   "instructions": INTENT_CHOICE_INSTRUCTION,
+                   "criteria": INTENT_CHOICE_CRITERIA},
+        "scene": {"type": "choice",
+                  "instructions": "这句话是在推进工作还是处理私人社交？",
+                  "criteria": CHAT_SCENES},
     }
 
     t0 = time.perf_counter()
@@ -98,8 +99,9 @@ def run_laya_multilingual() -> dict:
         try:
             out = agent.predict(text, question)
             ans = out["answers"]["intent"]
-            probs = ans.get("probabilities") or ans.get("probs") or {}
-            pred = ans.get("choice")
+            scene = normalize_chat_scene(
+                (out["answers"].get("scene") or {}).get("choice"))
+            pred = normalize_intent_for_scene(ans.get("choice"), scene)
             conf = float(ans.get("confidence", 0.0))
         except Exception as e:
             pred, conf = f"ERR:{type(e).__name__}", 0.0

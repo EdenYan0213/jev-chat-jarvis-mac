@@ -14,7 +14,15 @@ from emotions import (
     normalize_emotion_fields,
 )
 from generate import _endpoint, _extra_params, http_post_json
-from judge import ACTION_MAP, INTENTS
+from judge import (
+    ACTION_MAP,
+    CHAT_SCENES,
+    INTENTS,
+    INTENT_SELECTION_INSTRUCTION,
+    SCENE_BOUNDARY_EXAMPLES,
+    normalize_chat_scene,
+    normalize_intent_for_scene,
+)
 
 
 DEFAULT_BASE = "http://127.0.0.1:11434/v1"
@@ -113,15 +121,20 @@ class OpenAIJudge:
             f"{name}={desc}" for name, desc in EMOTIONS.items())
         trends = "；".join(
             f"{name}={desc}" for name, desc in EMOTION_TRENDS.items())
+        scenes = "；".join(
+            f"{name}={desc}" for name, desc in CHAT_SCENES.items())
         prompt = (
             f"结合完整对话判断最后一句。\n"
+            f"选择规则：{INTENT_SELECTION_INSTRUCTION}\n"
+            f"消息场景：{scenes}\n"
+            f"{SCENE_BOUNDARY_EXAMPLES}\n"
             f"意图定义：{intents}\n"
             f"情绪定义：{emotions}\n"
             f"趋势定义：{trends}\n"
             f"对话：{context or '无'}\n"
             f"最后一句：{message}\n"
             "只输出 JSON："
-            '{"i":"意图名","c":0到100,"r":0到9,"e":"情绪名",'
+            '{"p":"工作或朋友","i":"意图名","c":0到100,"r":0到9,"e":"情绪名",'
             '"ec":0到100,"s":0到4,"t":"趋势名"}。'
         )
         body = {
@@ -154,6 +167,9 @@ class OpenAIJudge:
 
         intent = _choice(
             result.get("i", result.get("intent")), INTENTS, "闲聊")
+        scene = normalize_chat_scene(
+            result.get("p", result.get("scene")))
+        intent = normalize_intent_for_scene(intent, scene)
         confidence = _number(
             result.get("c", result.get("confidence")), 0.0, 0.0, 1.0)
         risk = _number(
@@ -190,6 +206,7 @@ class OpenAIJudge:
             "actions": ACTION_MAP.get(intent, []),
             "message": message,
             "backend": f"openjev-style/{self.model}",
+            "scene": scene,
             **emotion_fields,
         }
 

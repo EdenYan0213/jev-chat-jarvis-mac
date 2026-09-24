@@ -22,7 +22,7 @@ class OpenAIJudgeTests(unittest.TestCase):
         )
         judge._post = Mock(return_value={"choices": [{"message": {"content": """
 ```json
-{"i":"催进度","c":82,"r":4.5,"e":"焦虑","ec":75,"s":3,"t":"升温"}
+{"p":"工作","i":"催进度","c":82,"r":4.5,"e":"焦虑","ec":75,"s":3,"t":"升温"}
 ```
 """}}]})
 
@@ -32,14 +32,73 @@ class OpenAIJudgeTests(unittest.TestCase):
         body = judge._post.call_args.args[0]
         self.assertEqual(body["model"], "qwen3.5:4b")
         self.assertEqual(body["max_tokens"], 120)
-        self.assertIn("已经等了两天", body["messages"][1]["content"])
+        sent = body["messages"][1]["content"]
+        self.assertIn("已经等了两天", sent)
+        self.assertIn(judge_module.INTENT_SELECTION_INSTRUCTION, sent)
+        self.assertIn("同事聊生活也属于朋友场景", sent)
+        self.assertIn("求助帮忙=", sent)
+        self.assertIn("朋友邀约=", sent)
         self.assertEqual(result["intent"], "催进度")
         self.assertEqual(result["confidence"], 0.82)
         self.assertEqual(result["risk"], 4.5)
         self.assertEqual(result["emotion"], "焦虑")
         self.assertEqual(result["emotion_intensity"], 3.0)
         self.assertEqual(result["emotion_trend"], "升温")
+        self.assertEqual(result["scene"], "工作")
         self.assertEqual(result["backend"], "openjev-style/qwen3.5:4b")
+
+    def test_parses_social_intent_with_matching_action_guidance(self):
+        judge = OpenAIJudge(base="http://local/v1", key="ollama", model="test")
+        judge._post = Mock(return_value={"choices": [{"message": {"content": """
+{"p":"朋友","i":"倾诉求安慰","c":91,"r":2,"e":"委屈","ec":88,"s":3,"t":"升温"}
+"""}}]})
+
+        result = judge.judge(
+            "今天真的好累，感觉谁都不理解我",
+            context="朋友: 最近工作一直不顺\n我: 怎么了，愿意和我说说吗",
+        )
+
+        self.assertEqual(result["intent"], "倾诉求安慰")
+        self.assertEqual(
+            result["actions"],
+            judge_module.ACTION_MAP["倾诉求安慰"],
+        )
+        self.assertEqual(result["emotion"], "委屈")
+        self.assertEqual(result["scene"], "朋友")
+
+    def test_private_scene_repairs_task_and_meeting_labels(self):
+        judge = OpenAIJudge(base="http://local/v1", key="ollama", model="test")
+        responses = iter([
+            {"choices": [{"message": {"content":
+                '{"p":"私人社交","i":"派活","c":80,"r":1,"e":"平静",'
+                '"ec":70,"s":0,"t":"稳定"}'}}]},
+            {"choices": [{"message": {"content":
+                '{"p":"朋友","i":"约会议","c":80,"r":1,"e":"期待",'
+                '"ec":70,"s":1,"t":"稳定"}'}}]},
+        ])
+        judge._post = Mock(side_effect=lambda _body: next(responses))
+
+        favor = judge.judge("能帮我取一下快递吗")
+        invitation = judge.judge("周末一起吃饭吗")
+
+        self.assertEqual(favor["scene"], "朋友")
+        self.assertEqual(favor["intent"], "求助帮忙")
+        self.assertEqual(invitation["intent"], "朋友邀约")
+        self.assertEqual(
+            judge_module.normalize_intent_for_scene("求助帮忙", "工作"),
+            "求助帮忙",
+        )
+
+    def test_every_intent_has_compact_criteria_and_action_guidance(self):
+        self.assertEqual(
+            set(judge_module.INTENTS),
+            set(judge_module.INTENT_CHOICE_CRITERIA),
+        )
+        self.assertEqual(
+            set(judge_module.INTENTS),
+            set(judge_module.ACTION_MAP),
+        )
+        self.assertEqual(len(judge_module.INTENTS), 16)
 
     def test_invalid_values_are_normalized_without_loading_fallback(self):
         judge = OpenAIJudge(base="http://local/v1", key="ollama", model="test")
@@ -57,6 +116,7 @@ class OpenAIJudgeTests(unittest.TestCase):
         self.assertEqual(result["emotion_confidence"], 0.05)
         self.assertEqual(result["emotion_intensity"], 4.0)
         self.assertEqual(result["emotion_trend"], "稳定")
+        self.assertEqual(result["scene"], "不确定")
 
     def test_oversized_context_keeps_summary_head_and_recent_tail(self):
         judge = OpenAIJudge(base="http://local/v1", key="ollama", model="test")

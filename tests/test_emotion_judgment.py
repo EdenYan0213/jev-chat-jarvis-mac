@@ -18,7 +18,7 @@ from emotions import (
     default_emotion_fields,
     format_emotion,
 )
-from judge import Judge
+from judge import INTENTS, INTENT_CHOICE_CRITERIA, Judge
 from judge_jev import JevJudge
 
 
@@ -51,6 +51,7 @@ class JevEmotionTests(unittest.TestCase):
             "emotion_trend": {"choice": "升温", "confidence": 0.73},
             "intent": {"choice": "催进度", "confidence": 0.8},
             "risk": {"score": 2.0},
+            "scene": {"choice": "工作", "confidence": 0.9},
         })
 
         result = judge.judge("今天能给吗", context="Alice 一直在等待")
@@ -59,7 +60,10 @@ class JevEmotionTests(unittest.TestCase):
         self.assertEqual(
             set(payload["questions"]),
             {"intent", "risk", "emotion",
-             "emotion_intensity", "emotion_trend"})
+             "emotion_intensity", "emotion_trend", "scene"})
+        self.assertEqual(
+            payload["questions"]["intent"]["criteria"],
+            INTENT_CHOICE_CRITERIA)
         self.assertEqual(
             payload["questions"]["emotion"]["criteria"],
             EMOTION_CHOICE_CRITERIA)
@@ -75,6 +79,19 @@ class JevEmotionTests(unittest.TestCase):
         self.assertEqual(result["emotion_intensity"], 3.2)
         self.assertEqual(result["emotion_trend"], "升温")
         self.assertEqual(result["intent"], "催进度")
+        self.assertEqual(result["scene"], "工作")
+
+    def test_friend_scene_repairs_work_only_intent(self):
+        judge = self.judge({
+            "intent": {"choice": "派活", "confidence": 0.75},
+            "risk": {"score": 1.0},
+            "scene": {"choice": "朋友", "confidence": 0.9},
+        })
+
+        result = judge.judge("帮我拿一下快递")
+
+        self.assertEqual(result["intent"], "求助帮忙")
+        self.assertEqual(result["scene"], "朋友")
 
     def test_malformed_emotion_fields_do_not_break_intent(self):
         judge = self.judge({
@@ -114,9 +131,9 @@ class LocalJudgeEmotionTests(unittest.TestCase):
         judge = object.__new__(Judge)
         judge._load = Mock()
         judge._forward = Mock(return_value=(
-            list(range(5)), [0, 1, 2, 3, 4]))
+            list(range(6)), [0, 1, 2, 3, 4, 5]))
 
-        intent = np.zeros(8)
+        intent = np.zeros(len(INTENTS))
         intent[1] = 1.0
         risk = np.zeros(10)
         risk[3] = 1.0
@@ -126,8 +143,9 @@ class LocalJudgeEmotionTests(unittest.TestCase):
         intensity[3] = 1.0
         trend = np.zeros(len(EMOTION_TRENDS))
         trend[list(EMOTION_TRENDS).index("升温")] = 1.0
+        scene = np.array([1.0, 0.0])
         judge._slot_probs = Mock(side_effect=[
-            intent, risk, emotion, intensity, trend])
+            intent, risk, emotion, intensity, trend, scene])
 
         result = Judge.judge(
             judge, "还没好吗", context="对方已经连续询问两次")
@@ -137,7 +155,8 @@ class LocalJudgeEmotionTests(unittest.TestCase):
         self.assertEqual(result["emotion_intensity"], 3.0)
         self.assertEqual(result["emotion_trend"], "升温")
         prompt, slots = judge._forward.call_args.args
-        self.assertEqual(slots, 5)
+        self.assertEqual(slots, 6)
+        self.assertEqual(result["scene"], "工作")
         self.assertIn("对方已经连续询问两次", prompt)
         self.assertIn("主情绪", prompt)
         self.assertIn("情绪趋势", prompt)
